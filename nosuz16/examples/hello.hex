@@ -1,0 +1,21 @@
+# Print "Hi\n" to UART, then halt.
+14BF  # ADDI r2, -1 (r2 = FFFF)
+0407  # SLL r2
+0407
+0407
+0407
+0407
+0407
+0407
+0407  # r2 = FF00, UART DATA
+125F  # ADDI r1, 31
+125F  # ADDI r1, 31
+124A  # ADDI r1, 10 (r1 = 72, 'H')
+3280  # ST r1, [r2 + 0]
+125F  # ADDI r1, 31
+1242  # ADDI r1, 2 (r1 = 105, 'i')
+3280
+0246  # XOR r1, r1
+124A  # ADDI r1, 10 ('\n')
+3280
+F000  # HALT (N16-REF-1 SYSTEM instruction)

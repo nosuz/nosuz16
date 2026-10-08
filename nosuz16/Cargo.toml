@@ -1,0 +1,8 @@
+[package]
+name = "nosuz16"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Nosuz16 v2.4 CPU emulator and command-line runner"
+
+[dependencies]
