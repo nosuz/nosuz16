@@ -1,0 +1,12 @@
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+      # target: ${TARGET:-runtime}
+      args:
+        CODEX_BUST: ${CODEX_BUST:-0}
+        CLAUDE_BUST: ${CLAUDE_BUST:-0}
+    command: sleep infinity
+    volumes:
+      - ..:/workspaces

@@ -1,0 +1,10 @@
+[project]
+name = "python-template"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "git-filter-repo>=2.47.0",
+]

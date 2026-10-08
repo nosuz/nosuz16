@@ -1,0 +1,30 @@
+{
+  "name": "CodexContainer",
+  "workspaceFolder": "/workspaces",
+  "remoteUser": "ubuntu",
+  "updateRemoteUserUID": true,
+  // UID and GID is imported from .env file.
+  "dockerComposeFile": "compose.yaml",
+  "service": "dev",
+  // Features to add to the dev container. More info: https://containers.dev/features.
+  // "features": {},
+
+  // Use 'forwardPorts' to make a list of ports inside the container available locally.
+  // "forwardPorts": [],
+
+  // Uncomment the next line to run commands after the container is created.
+  "postCreateCommand": "bash /workspaces/.devcontainer/postCreateCommand.sh",
+
+  // Configure tool-specific properties.
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/opt/venv/bin/python"
+      },
+      "extensions": [
+        "mhutchie.git-graph",
+        "streetsidesoftware.code-spell-checker"
+      ]
+    }
+  }
+}
