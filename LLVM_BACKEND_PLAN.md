@@ -3,8 +3,8 @@
 Implement an experimental LLVM backend for [Nosuz16 v2.4](Nosuz16_CPU_Spec.md)
 and validate its output with the [Rust emulator](nosuz16/README.md). The first
 deliverable is a working compiler pipeline for a restricted set of LLVM IR
-programs. General C support follows an explicit decision about memory and
-pointer representation.
+programs. The selected C memory model maps each eight-bit C byte to one
+CPU word, using 16-bit word-addressed pointers.
 
 ```text
 LLVM IR → Nosuz16 assembly → HEX or BIN image → Nosuz16 emulator
@@ -13,19 +13,19 @@ LLVM IR → Nosuz16 assembly → HEX or BIN image → Nosuz16 emulator
 The CPU instruction set remains unchanged. SelectionDAG will handle initial
 instruction selection; GlobalISel is outside the first implementation.
 
-## Implementation status — 2026-10-09
+## Implementation status — 2026-10-10
 
 The initial IR-to-image milestone is implemented in
 [llvm-nosuz16/](llvm-nosuz16/README.md), with the LLVM source delivered as a
 patch against the recorded revision. Stages 1–6 are implemented and tested;
-Stage 7 includes software `i16` multiply/divide/remainder helpers. Wider
-arithmetic, general C memory access, the long-term memory model, and a public
-ELF/LLD ABI remain future work. An experimental Clang frontend now supports
-optimized scalar C with word-sized function signatures and explicit word I/O;
-its eight-bit `char` does not define the eventual CPU memory mapping.
+Stage 7 includes software `i16` arithmetic, UART output, and byte-per-word C
+memory. Clang supports ordinary memory at O0/O1/O2, fixed scalar calls,
+pointers, arrays, global data, and structure fields/copies. Wider arithmetic,
+aggregate calling conventions, full libc, and a public ELF/LLD ABI remain
+future work.
 
-Validation passed: ten Clang/LLVM MC/CodeGen tests, 15 C cases with
-180 guest executions, 32 IR execution cases at O0/O2
+Validation passed: twelve Clang/LLVM MC/CodeGen tests, 31 C cases with
+558 guest executions plus one relocated global-pointer run, 32 IR cases at O0/O2
 through assembly and direct-object paths (128 guest executions), 713 LLVM
 TargetParser unit tests (four platform-specific skips), and all 31 Rust
 emulator tests. The example prints `Hi` and returns 42 with sp restored to
@@ -51,41 +51,40 @@ build scripts, and execution-test scripts in a tracked `llvm-nosuz16/`
 directory in the main repository. Record the base revision with the patches
 so another checkout can reproduce the backend. The implementation is delivered in [llvm-nosuz16/](llvm-nosuz16/README.md).
 
-## Memory model decision
+## Selected C memory model — 2026-10-10
 
-The CPU uses 16-bit word addresses. LLVM represents storage sizes and pointer
-offsets using eight-bit bytes, and this checkout's Clang fixes `char` width
-and alignment at eight bits. These assumptions are visible in
-`llvm/include/llvm/IR/DataLayout.h` and
-`clang/include/clang/Basic/TargetInfo.h`.
+The user selected one eight-bit C byte per CPU word. Ordinary C loads mask
+upper bits and stores clear them. LLVM byte offsets therefore correspond
+one-to-one to CPU word addresses. `char` stays eight-bit, `sizeof(int)` and
+`sizeof(void *)` stay 2, and a stored int or pointer uses two consecutive
+CPU words in little-endian byte order. This exposes 64K C bytes through
+16-bit pointers, without packing two C bytes into one word.
 
-A target DataLayout string alone cannot turn LLVM bytes into CPU words.
-Changing pointer width also does not solve the difference in address units.
-Do not apply a general rule that divides every pointer offset by two: odd
-byte offsets, packed objects, and byte accesses require their own semantics.
+The implementation keeps the CPU ISA and physical word bus unchanged.
+Explicit `nosuz16_ldw/stw` operations still read and write full native words,
+including UART registers. Their conservative memory effects preserve
+observable reads and I/O ordering.
 
-The initial backend will compile register arithmetic, control flow, calls,
-compiler-generated stack accesses, and explicit word-memory operations.
-Word-memory operations will take a 16-bit integer word address, using target
-intrinsics rather than ordinary LLVM pointer arithmetic. Initially, preserve
-their ordering conservatively, including I/O accesses. Declare their memory
-effects accurately; a read discarded by its caller can still consume UART
-input and must not be removed.
+The memory lowering pass converts ordinary scalar loads/stores into masked
+word operations. GEP, pointer casts, comparisons, and array/structure offsets
+retain LLVM's ordinary byte-based layout. Global data expands each byte into
+a word; stored symbolic pointers use a private relocation that writes the
+word address as two byte-valued words. Static C allocas reserve twice their
+LLVM byte size so each logical byte has a physical word. Native allocator
+spill slots and ABI argument slots retain one full word per scalar value.
 
-Compiler-generated stack layout still uses LLVM's byte-based offsets. Require
-word-aligned slots and translate those offsets explicitly when producing
-machine addresses. Generic IR loads, stores, GEP operations, and general
-pointer conversions remain unsupported until their mapping is defined.
+Physical frame alignments are divided by two when deriving known pointer
+bits; otherwise LLVM could wrongly replace pointer addition with bitwise OR.
+Memory lowering runs after generic IR preparation to keep physical frame
+sizes out of ordinary C pointer optimization. Compiled calls require an
+even word-addressed sp. Default C int/pointer alignment is two words, while
+packed structure access can be unaligned.
 
-Choose one long-term model before starting general Clang integration:
-
-| Model | Consequences |
-| --- | --- |
-| Native word addressing | Preserve the proposed 16-bit char and word-pointer C model. Requires custom frontend integration and an audit of LLVM memory assumptions beyond ordinary target configuration. |
-| Emulated byte addressing | Keep ordinary Clang eight-bit chars. Implement byte extraction and read-modify-write stores. Covering 64K CPU words requires at least 17 bits of byte address, likely using 32-bit C pointers and a separate language ABI. |
-
-The choice remains open. Early arithmetic, encoding, and register-allocation
-work can proceed independently. Neither model changes the physical CPU ISA.
+The ABI retains fixed scalar calls. Integers up to 16 bits and pointers
+occupy native word argument registers/slots, regardless of their memory
+representation. Aggregate values/ABI, dynamic stack allocation, overaligned
+stack objects, wider arithmetic, atomics, and floating point remain separate
+extensions. LLVM memcpy/memmove/memset intrinsics use software helpers.
 
 ## Initial scope
 
@@ -129,7 +128,7 @@ cmake --build llvm-project/build-nosuz16 --parallel 2 \
 
 The experimental-target option requires the target to have been registered;
 apply the tracked patch before using this configuration. Build further tools required by individual tests as the
-test suite grows. This configuration includes the restricted scalar Clang
+test suite grows. This configuration includes the restricted Clang
 frontend; Nosuz16 LLD integration remains future work.
 
 **Completion:** a clean build from the recorded baseline and patches is
@@ -249,23 +248,21 @@ Add runtime helpers for multiplication, division, remainder, and wider
 integer operations. Extend legalization and define the ABI for any additional
 multiword argument types. Test carry and borrow chains used by wider values.
 
-Resolve the long-term memory model before implementing general pointers,
-arrays, structures, memory intrinsics, or general Clang memory access. Define the
-language data model, object layout, pointer conversions, null pointer
-representation, and volatile I/O rules consistently.
+The byte-per-word memory model is selected and implemented for pointers,
+arrays, structure fields, global data, and static local objects. Keep language
+layout, pointer conversions, null representation, and volatile I/O consistent
+when adding wider values or aggregate calling conventions.
 
-The scalar Clang target is implemented independently of that decision. It
-requires frontend optimization (O1/O2) to eliminate ordinary local loads and
-stores, and exposes word I/O through `nosuz16.h`. Expand this subset after
-choosing the memory model. Add ELF relocations and LLD integration for a
+The Clang target supports ordinary memory at O0/O1/O2 and exposes native
+word I/O through `nosuz16.h`. Add ELF relocations and LLD integration for a
 standard object/linking workflow; the current private object format and image
 builder already support separate compilation.
 Floating-point runtime support and debugging information are later extensions.
 
 Literal `printf` calls are supported through a target IR expansion pass,
-with fixed-argument UART and integer-formatting helpers. Constant format and
-`%s` strings avoid a general pointer or variadic ABI; dynamic strings and
-full libc formatting remain future work.
+with fixed-argument UART and integer-formatting helpers. The format must
+remain constant; `%s` can print a runtime character buffer. General variadic
+calls and full libc formatting remain future work.
 
 **Completion:** the supported language and ABI are documented, and compiled
 C programs pass execution tests without relying on host data-layout defaults.
@@ -288,8 +285,8 @@ settings before claiming support for a feature.
 
 The first implementation is complete when a clean build can compile the
 documented IR subset, produce executable images, and pass all three test
-layers. General Clang C support is a separate milestone and depends on the
-memory-model decision.
+layers. Broader Clang C support builds on the selected memory model and
+requires wider arithmetic, aggregate ABI, and runtime work.
 
 ## References
 

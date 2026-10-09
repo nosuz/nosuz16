@@ -229,7 +229,7 @@ define i16 @main() { %v=call i16 @sum(i16 100) ret i16 %v }''', 4950)
             test(f'runtime-{op}-{a}-{b}',f"define i16 @calc(i16 %a,i16 %b) {{ %v={op} i16 %a,%b ret i16 %v }}\ndefine i16 @main() {{ %v=call i16 @calc(i16 {a},i16 {b}) ret i16 %v }}",expected,runtime=runtime)
         test('constant-divrem', 'define i16 @calc(i16 %a) { %q=udiv i16 %a,7 %r=urem i16 %a,7 %v=add i16 %q,%r ret i16 %v }\ndefine i16 @main() { %v=call i16 @calc(i16 -1) ret i16 %v }',65535//7+65535%7,runtime=runtime)
         for name, ir, diagnostic in (
-            ('pointer', 'define i16 @main() { %v=load i16,ptr null ret i16 %v }','generic memory'),
+            ('atomic', 'define i16 @main() { %v=load atomic i16,ptr null monotonic,align 2 ret i16 %v }','atomic memory'),
             ('indirect', 'define i16 @main() { %v=call i16 null() ret i16 %v }','indirect calls'),
             ('wide', 'define i32 @main() { ret i32 1 }','return must'),
             ('varargs', 'define i16 @main(...) { ret i16 1 }','variadic'),

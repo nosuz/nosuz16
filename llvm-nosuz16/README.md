@@ -2,9 +2,9 @@
 
 This backend targets [Nosuz16 v2.4](../Nosuz16_CPU_Spec.md) through
 SelectionDAG and LLVM MC. It compiles a restricted LLVM IR subset to runnable
-word-addressed HEX/BIN images. Clang supports an experimental optimized scalar
-C subset. General C memory support requires the memory-model choice discussed
-in the [implementation plan](../LLVM_BACKEND_PLAN.md).
+word-addressed HEX/BIN images. Clang supports freestanding C with ordinary
+loads/stores, pointers, arrays, structures, and globals using one C byte per
+CPU word. Wider arithmetic and the full C library remain outside this subset.
 
 ## Repository storage
 
@@ -42,13 +42,13 @@ expects `main` to take no arguments and return an `i16` or void.
 inside the ignored LLVM checkout. The backend source and LLVM regression
 tests are carried in [the patch](patches/0001-nosuz16-backend.patch).
 
-## Clang scalar C frontend
+## Clang C frontend
 
-The build includes `clang` with a Nosuz16 target. Compile optimized, freestanding
-C with 16-bit `int`/`unsigned int` functions, arithmetic, comparisons, loops,
-and fixed-argument calls. Function arguments and non-void returns must occupy
-one 16-bit word. `char` and boolean intermediates can be promoted within
-word-sized functions.
+The build includes `clang` with a Nosuz16 target. Compile freestanding C at
+`-O0`, `-O1`, or `-O2`, including arithmetic, comparisons, loops, fixed-argument
+calls, pointers, addressable local variables, arrays, globals, and structure
+fields. Supported scalar arguments and returns are integers up to 16 bits
+and 16-bit pointers; structures passed or returned by value remain unsupported.
 
 ```sh
 export PATH="/workspaces/llvm-project/build-nosuz16/bin:$PATH"
@@ -63,17 +63,54 @@ python3 llvm-nosuz16/tests/clang.py
 link these objects with startup and runtime; system linkers and Clang's
 ordinary executable-linking step do not support Nosuz16.
 
-Use `-O1` or `-O2`: optimization must eliminate ordinary C local-variable
-loads/stores before the restricted backend runs. `-O0`, address-taken or
-volatile locals, general pointer dereferences, arrays with memory accesses,
-mutable globals, wider values, floating point, varargs, and standard-library
-calls are outside this subset. The backend rejects unsupported surviving IR.
+### C memory model
 
-This frontend retains Clang's eight-bit `char` and byte-based `sizeof`; an
-`int` is 16 bits and `sizeof(int)` is 2. This does **not** implement the proposed
-16-bit-char language model or choose a general byte-pointer mapping. Ordinary
-C pointer accesses remain unsupported. The `__NOSUZ16_SCALAR_C__` macro
-identifies this experimental frontend.
+Each C byte occupies one CPU word. Ordinary reads ignore the upper eight bits;
+ordinary writes clear them. `char` is eight-bit, `sizeof(char)` is 1, and
+`sizeof(int)` and `sizeof(void *)` are 2. Thus a character uses one physical
+word, while an int or stored pointer uses two, with the low byte first.
+
+| C object | Physical storage |
+| --- | --- |
+| `unsigned char c = 0xab` | `00AB` |
+| `unsigned int n = 0x1234` | `0034 0012` |
+| A pointer containing `0xe000` | `0000 00E0` |
+
+C pointers hold CPU word addresses. `char *p + 1` advances one word and
+`int *p + 1` advances two. Array strides, structure offsets, padding, and
+`sizeof` follow the usual byte-based C layout, with each byte mapped to a
+word. This covers 64K C bytes with 16-bit pointers, using 128 KiB of physical
+RAM. Code, stack, and I/O reduce the RAM available to program objects.
+
+Signed char loads sign-extend the low byte after masking. Stored bytes always
+have zero upper bits. Object and pointer access works above address `0x8000`.
+Integer/pointer alignment is two C bytes (two words); packed structures can
+use alignment one. Null pointers contain zero. The
+`__NOSUZ16_BYTE_PER_WORD__` macro identifies this memory model; the older
+`__NOSUZ16_SCALAR_C__` macro is retained for compatibility.
+
+Compiler spills and ABI argument slots still hold native 16-bit values in
+one word. Addressable C locals reserve byte-per-word storage separately.
+Generated calls keep sp aligned to two words. Software helpers implement
+LLVM memcpy, memmove, and memset intrinsics, including overlapping memmove.
+`compile.sh` links [runtime/memory.c](runtime/memory.c) automatically.
+Rebuild previously compiled objects when adopting this profile and its stack
+alignment requirement.
+
+Dynamic stack allocation/VLAs, stack alignment above two C bytes, aggregate
+arguments/returns, wider scalar memory values/arithmetic, floating point,
+atomics, exceptions, indirect calls, and user-defined variadic functions
+remain unsupported. System headers and a full libc are not supplied.
+
+Try a line buffer with runtime `%s` output:
+
+```sh
+./llvm-nosuz16/scripts/compile-c.sh llvm-nosuz16/examples/read-line.c /tmp/line.hex
+cargo run --manifest-path nosuz16/Cargo.toml -- \
+  --uart-input $'Hello\n' --dump /tmp/line.hex
+```
+
+This prints `You typed: Hello` followed by a newline and returns 17.
 
 Include [include/nosuz16.h](include/nosuz16.h) for explicit word-memory I/O:
 
@@ -101,7 +138,7 @@ returns that byte as an `int`.
 Both `compile-c.sh` and `compile.sh` link this runtime automatically. For
 manual object linking, compile `runtime/console.c` with the same target,
 freestanding flags, include directory, and `-O2`, then pass its object to
-`image.py` alongside your program, startup, and arithmetic runtime.
+`image.py` alongside your program, startup, arithmetic, and memory runtimes.
 
 ```c
 #include "nosuz16.h"
@@ -122,8 +159,8 @@ cargo run --manifest-path nosuz16/Cargo.toml -- \
 
 `nosuz16.h` also declares `int printf(const char *format, ...)`. Supported
 conversions are `%d`, `%i`, `%u`, `%x`, `%X`, `%o`, `%c`, `%s`, and `%%`.
-Integer arguments use the 16-bit C `int`/`unsigned int` types. Both the format
-and any `%s` argument must resolve to constant strings. `%c` sends the low
+Integer arguments use the 16-bit C `int`/`unsigned int` types. The format
+must resolve to a constant string; `%s` also supports runtime character buffers. `%c` sends the low
 eight bits, including NUL; `%s` stops at the first NUL. The return value is
 the number of UART bytes written; use messages that fit a signed 16-bit count.
 
@@ -143,21 +180,22 @@ This prints `Hello Nosuz16! value=-123 hex=BEEF %` followed by a newline
 and returns 37. The backend expands literal `printf` calls into fixed-argument
 calls to `putc` and number-formatting helpers in `runtime/console.c`. These
 helpers are linked automatically by the image compiler. Direct Clang object
-users should link that runtime and `runtime/arithmetic.ll` through `image.py`.
+users should link the console, memory, and arithmetic runtimes through `image.py`.
 There is no standalone variadic `printf` ABI or function-pointer entry point.
-Dynamic strings, width, precision, flags, length modifiers, floating-point
-conversions, and other specifiers produce a compiler diagnostic. General
-pointers and variadic functions remain outside the scalar C subset.
+Dynamic format strings, width, precision, flags, length modifiers, floating-point
+conversions, and other specifiers produce a compiler diagnostic. User-defined
+variadic functions remain unsupported.
 
 ## Supported IR and ABI
 
-Functions use the ordinary LLVM `ccc` with fixed `i16` arguments and either
-an `i16` or void return. The first three arguments use r1-r3; remaining
+Functions use the ordinary LLVM `ccc` with fixed scalar integer/pointer
+arguments and a scalar or void return. Scalar values occupy one native word
+in the call ABI, regardless of their C memory representation. The first three arguments use r1-r3; remaining
 arguments occupy consecutive words at the caller's sp. The caller reserves
 and releases outgoing argument space. The outgoing stack argument area is
 limited to 32766 LLVM bytes (16383 CPU words). Returns use r1. r4/r5 and sp are
 preserved; functions that overwrite r7 save their incoming link register.
-Flags are caller-saved.
+Flags are caller-saved. Incoming sp must be an even CPU word address.
 
 The allocator uses r1-r4. r0, sp/r6, and lr/r7 are reserved; r5 is reserved
 for long branches. A branch-using function saves r5 as required by the ABI.
@@ -170,22 +208,21 @@ Implemented operations include constants, add/subtract, bitwise logic,
 signed/unsigned comparisons, boolean intermediates, select, shifts, branches,
 loops, calls, returns, and register spills. Constant shifts emit native
 one-bit shifts; variable shifts use loops. Defined `i16` shift counts are
-0 through 15. `i1`/`i8` intermediates are legalized; function arguments and
-returns remain word-sized.
+0 through 15. `i1`/`i8` values are legalized; function arguments and
+returns occupy native words.
 
 Multiplication, signed/unsigned division, and remainder call software
 helpers in [runtime/arithmetic.ll](runtime/arithmetic.ll). `compile.sh`
 links those helpers automatically. Direct `llc` users must link the runtime
 when their IR needs it. Division by zero and signed INT_MIN/-1 have LLVM's
-undefined semantics. Wider operations, floating point, aggregates, atomics,
-exceptions, variadic/indirect calls, and general pointers are outside this
-release. Unsupported IR produces an error.
+undefined semantics. Wider operations, floating point, aggregate values/ABI, atomics,
+exceptions, and variadic/indirect calls are outside this release. Unsupported IR produces an error.
 
 ### Word memory and I/O
 
-Ordinary LLVM pointer loads/stores, GEP, alloca, and pointer conversions are
-rejected. The target DataLayout does not redefine LLVM's byte unit. Instead,
-these intrinsics use an integer CPU **word address**:
+Ordinary pointer memory accesses use the byte-per-word representation above.
+For full native words, including memory-mapped I/O, these intrinsics use an
+integer CPU **word address**:
 
 ```llvm
 declare i16 @llvm.nosuz16.ldw(i16)
@@ -269,12 +306,14 @@ object emission, with a bounded instruction limit. Startup seeds r4/r5 with
 sentinels and checks callee preservation and restored sp. The suite also
 runs the emulator's existing Rust tests.
 
-Verified against the pinned LLVM checkout: ten Clang/MC/CodeGen tests;
-32 IR cases with 128 guest runs; 15 C cases with 180 guest runs;
+Verified against the pinned LLVM checkout: twelve Clang/MC/CodeGen tests;
+32 IR cases with 128 guest runs; 31 C cases with 558 guest runs plus
+a relocated global-pointer run;
 713 TargetParser tests passed with four host-platform skips; and all 31
 emulator tests passed. Both IR and C compile scripts produced and ran the
-`Hi` example successfully. C execution covers frontend O1/O2, LLVM codegen
+`Hi` example successfully. C execution covers frontend O0/O1/O2, LLVM codegen
 O0/O2, direct Clang assembly/object emission, software arithmetic, calls with
-70 arguments, observable UART reads, the `getc`/`putc` runtime, and literal `printf` formatting. An empty
-UART input also checks that `getc` keeps waiting. Unsupported C cases are checked for
-diagnostics.
+70 arguments, observable UART reads, byte/int/pointer storage, high addresses,
+array and structure access/copy, packed layouts, stack alignment, memory
+intrinsics, and runtime `%s` buffers. An empty UART input checks that `getc`
+keeps waiting. Unsupported C cases are checked for diagnostics.

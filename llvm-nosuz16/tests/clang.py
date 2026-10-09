@@ -25,19 +25,22 @@ def main():
         console = directory / 'console.o'
         run([CLANG, *FLAGS, '-O2', '-c', ROOT / 'llvm-nosuz16/runtime/console.c',
              '-o', console])
+        memory = directory / 'memory.o'
+        run([CLANG, *FLAGS, '-O2', '-c', ROOT / 'llvm-nosuz16/runtime/memory.c',
+             '-o', memory])
         start = directory / 'start.o'
         assemble(STARTUP, start)
 
         def test(name, source, expected, output='', input_text=''):
             c = directory / f'{name}.c'
             c.write_text(source)
-            for level in (1, 2):
+            for level in (0, 1, 2):
                 ir = directory / f'{name}-{level}.ll'
                 run([CLANG, *FLAGS, f'-O{level}', '-S', '-emit-llvm', c, '-o', ir])
                 # Both LLVM codegen levels and assembly/direct-object paths.
                 execute(directory, f'c-{name}-O{level}', ir.read_text(), expected,
                         runtime=runtime, startup=STARTUP, output=output, input_text=input_text,
-                        extra_objects=(console,))
+                        extra_objects=(console, memory))
                 asm = directory / f'{name}-{level}.s'
                 object_file = directory / f'{name}-{level}.o'
                 assembled = directory / f'{name}-{level}-assembled.o'
@@ -46,7 +49,7 @@ def main():
                 run([CLANG, *FLAGS, f'-O{level}', '-c', c, '-o', object_file])
                 for obj in (object_file, assembled):
                     image = directory / 'program.bin'
-                    run(['python3', IMAGE, start, obj, runtime, console, '-o', image])
+                    run(['python3', IMAGE, start, obj, runtime, console, memory, '-o', image])
                     result = run([EMU, '--dump', '--max-steps', '1000000',
                                   '--uart-input', input_text, image])
                     assert result.stdout == output, result
@@ -122,8 +125,105 @@ int main(void) {
         source=f'__attribute__((noinline)) int many({arguments}) {{ return '+'+'.join(f'a{i}' for i in range(count))+f'; }}\nint main(void) {{ return many({values}); }}'
         test('stack-args',source,count*(count+1)//2)
 
+        test('byte-storage', '''#include "nosuz16.h"
+int main(void) {
+  volatile unsigned char *p = (volatile unsigned char *)0x4000u;
+  nosuz16_stw(0x4000u, 0xabcd);
+  unsigned int read = *p;
+  *p = 255;
+  return read + nosuz16_ldw(0x4000u);
+}''', 460)
+        test('int-storage', '''#include "nosuz16.h"
+int main(void) {
+  volatile unsigned int *p = (volatile unsigned int *)0x4000u;
+  *p = 0xabcd;
+  unsigned char *bytes = (unsigned char *)p;
+  return (*p == 0xabcd && bytes[0] == 0xcd && bytes[1] == 0xab &&
+          nosuz16_ldw(0x4000u) == 0xcd && nosuz16_ldw(0x4001u) == 0xab &&
+          (unsigned int)(p + 1) == 0x4002u);
+}''', 1)
+        test('high-address', '''#include "nosuz16.h"
+int main(void) {
+  volatile unsigned char *p = (volatile unsigned char *)0xe000u;
+  p[0] = 255; p[1] = 128;
+  return p[0] + p[1] + ((unsigned int)(p + 1) == 0xe001u);
+}''', 384)
+        test('char-abi', '''__attribute__((noinline)) signed char byte(signed char v) { return v; }
+__attribute__((noinline)) unsigned char positive(unsigned char v) { return v; }
+int main(void) { volatile signed char a=-1; volatile unsigned char b=255;
+ return byte(a) + positive(b); }''', 254)
+        test('pointer-abi', '''__attribute__((noinline)) int *select(int *a,int *b,int *c,int *d) { return d; }
+int main(void) { int a=1,b=2,c=3,d=41; int *p=select(&a,&b,&c,&d); ++*p;
+ return *p + a + b + c; }''', 48)
+        test('array-stack', '''__attribute__((noinline)) int sum(int *p,int n) {
+ int s=0; for(int i=0;i<n;++i) s+=p[i]; return s;
+}
+int main(void) { int a[6]={1,2,3,4,5,6}; return sum(a,6); }''', 21)
+        test('struct', '''struct S { unsigned char a; int b; char c; };
+__attribute__((noinline)) int inspect(struct S *p) {
+ p->a=255; p->b=-123; p->c=7;
+ return p->a+p->b+p->c + sizeof(struct S) + ((char *)&p->b-(char *)p);
+}
+int main(void) { struct S s; return inspect(&s); }''', 147)
+        test('packed', '''struct __attribute__((packed)) S { char a; int b; char c; };
+__attribute__((noinline)) int inspect(struct S *p) { p->a=1;p->b=300;p->c=2;
+ return p->a+p->b+p->c+sizeof(struct S)+((char *)&p->b-(char *)p); }
+int main(void) { struct S s; return inspect(&s); }''', 308)
+        test('globals', '''#include "nosuz16.h"
+char text[]="Hello";
+int values[3]={1,-2,300};
+char *message=text+1;
+int *number=values+2;
+struct S {char a;int b;char c;} state={3,100,4};
+int main(void) { values[0]=42; state.b+=2;
+ return printf("%s",message) + *number + values[0] + state.a+state.b+state.c; }
+''', 455, 'ello')
+        test('pointer-storage', '''#include "nosuz16.h"
+int main(void) { volatile unsigned char **p=(volatile unsigned char **)0x4000u;
+ *p=(volatile unsigned char *)0xe000u; **p=42;
+ return **p + nosuz16_ldw(0x4000u) + nosuz16_ldw(0x4001u); }
+''', 266)
+        test('large-stack', '''__attribute__((noinline)) int fill(char *p) { p[0]=3;p[127]=4;return p[0]+p[127]; }
+int main(void) { char buffer[128]; return fill(buffer); }''', 7)
+        test('memory-intrinsics', '''#include "nosuz16.h"
+int main(void) { char buffer[12];
+ __builtin_memset(buffer,0,sizeof(buffer));
+ __builtin_memcpy(buffer,"abcdef",7);
+ __builtin_memmove(buffer+1,buffer,6);
+ return printf("%s",buffer); }
+''', 7, 'aabcdef')
+        test('bool-memory', '''__attribute__((noinline)) _Bool flip(_Bool *p) { *p=!*p;return *p; }
+int main(void) { _Bool b=0; return flip(&b); }''', 1)
+        text = 'You typed: Hello\n'
+        test('read-line', (ROOT / 'llvm-nosuz16/examples/read-line.c').read_text(),
+             len(text), text, 'Hello\n')
+        test('struct-copy', '''struct S { char a; int b; char c; };
+struct S initial={3,100,4};
+__attribute__((noinline)) int copy(struct S *d,struct S *s) {
+ *d=*s; return d->a+d->b+d->c;
+}
+int main(void) { struct S a=initial,b;int n=copy(&b,&a);a.b=0;return n+b.b; }
+''', 207)
+        test('stack-alignment', '''__attribute__((noinline)) int check(char *p) {
+ volatile int n=3; *p=1; return ((unsigned int)&n & 1u)==0u;
+}
+int main(void) { char a[3]; volatile int n=4;
+ return check(a)+(((unsigned int)&n & 1u)==0u); }
+''', 2)
+        # Symbolic pointer initializers must relocate at a nonzero load address.
+        relocated = directory / 'relocated.bin'
+        run(['python3', IMAGE, '--origin', '0x100', start, directory / 'globals-2.o',
+             runtime, console, memory, '-o', relocated])
+        result = run([EMU, '--dump', '--load-address', '0x100', relocated])
+        assert result.stdout == 'ello' and 'r1=01C7' in result.stderr, result
+        assert 'r4=1234 r5=ABCD r6=FF00' in result.stderr, result
+        assert 'halted=true faulted=false' in result.stderr, result
+        print('PASS global pointer relocation at nonzero origin')
+
         for name, source, diagnostic in (
-            ('memory', 'int main(void) { return *(volatile int *)0x4000u; }','generic memory'),
+            ('memory', 'int main(void) { return *(volatile long *)0x4000u; }','memory values'),
+            ('overaligned', 'int main(void) { _Alignas(4) volatile int n=1; return n; }', 'stack alignment'),
+            ('vla', 'int main(void) { volatile int n=3; volatile char a[n]; a[0]=1; return a[0]; }', 'dynamic'),
             ('wide', 'long wide(long a) { return a+1; }','return must'),
             ('varargs', 'int variable(int a, ...) { return a; }','variadic'),
             ('float', 'float number(float a) { return a+1.0f; }','return must'),
@@ -131,7 +231,7 @@ int main(void) {
             ('printf-float', '#include "nosuz16.h"\nint main(void) { return printf("%f", 1.0); }', 'unsupported conversion'),
             ('printf-missing', '#include "nosuz16.h"\nint main(void) { return printf("%d"); }', 'missing conversion argument'),
             ('printf-dynamic', '#include "nosuz16.h"\nint main(void) { return printf((const char *)0x4000u, 1); }', 'format must be a constant'),
-            ('printf-string', '#include "nosuz16.h"\nint main(void) { return printf("%s", (const char *)0x4000u); }', '%s requires a constant'),
+            ('printf-string', '#include "nosuz16.h"\nint main(void) { return printf("%s", 1); }', '%s requires a character pointer'),
             ('printf-wide', '#include "nosuz16.h"\nint main(void) { return printf("%d", 1L); }', 'integer conversion arguments must be i16'),
             ('printf-incomplete', '#include "nosuz16.h"\nint main(void) { return printf("abc%"); }', 'incomplete conversion')):
             c=directory/f'{name}.c';c.write_text(source)

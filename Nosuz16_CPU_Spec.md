@@ -511,3 +511,39 @@ CPUのwordモデルとは別に、ツール間交換用の形式を定義する�
 1 address = 1 word
 PC += 1
 ```
+
+# Clang Cメモリプロファイル（byte-per-word）
+
+このプロファイルはCPU v2.4のISAを変更せず、Clangで生成するCプログラムの
+オブジェクト表現を定義する。1 C byteを1 CPU wordに格納し、下位8bitを使用する。
+通常のCメモリ読み取りは上位8bitを無視し、書き込みは上位8bitを0にする。
+RAMそのもの、命令、レジスタ、ABIの引数スロット、コンパイラのspillは従来通り
+16bit wordであり、`nosuz16_ldw/stw`も完全な16bit値を扱う。
+
+| C型 | C上の幅 | sizeof | 格納に使うCPU word数 |
+| --- | --- | --- | --- |
+| char / signed char / unsigned char | 8bit | 1 | 1 |
+| _Bool | 0または1 | 1 | 1 |
+| int / unsigned int | 16bit | 2 | 2 |
+| オブジェクトポインタ | 16bit word address | 2 | 2 |
+
+`CHAR_BIT`は8。`signed char`のロードは下位8bitの符号を拡張するが、
+格納されるwordの上位8bitは常に0。intとポインタはlittle-endianのC byte列として
+格納する。例えば1234hは連続する2 wordに0034h、0012hとして格納する。
+ポインタの数値はCPUのword addressと一致し、`char *p`の`p+1`は次のword、
+`int *p`の`p+1`は2 word先を指す。16bitで64K C byteのアドレス空間を表現できる。
+
+配列、構造体のoffset、padding、sizeofは通常の8bit byteを使うCレイアウトで
+計算し、それぞれのC byteを1 wordに対応させる。intとポインタの通常のalignmentは
+2 C byte（2 word）。packed構造体はalignment 1でもアクセス可能。
+ポインタのnull表現は0000hであり、nullのdereferenceはCの未定義動作となる。
+
+アドレスを取得するCの自動変数はこの表現を使用する。コンパイラ内部の
+register spillや関数の引数スロットはnative wordを使用し、Cのbyte列とは区別する。
+Clang生成関数の呼び出し時はspを偶数word addressに揃える。
+
+UARTなどの16bitメモリマップドI/Oには`nosuz16_ldw/stw`を使う。
+通常のCのintアクセスは2 wordへのアクセスであり、16bit I/Oアクセスの代用には
+ならない。ハードウェアが書き込んだwordをcharとして読む場合も下位8bitだけを見る。
+コードとデータをこのCプロファイルでコンパイルし直し、以前の未定義のCメモリ表現を
+使うオブジェクトと混在させないこと。

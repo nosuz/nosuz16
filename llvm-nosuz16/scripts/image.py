@@ -120,7 +120,7 @@ def link(paths, origin):
                 if value % 2:
                     raise ValueError('relocation target is not word aligned')
                 start = target['base'] - origin * 2 + offset
-                required = 66 if kind == 3 else 2
+                required = 66 if kind == 3 else 4 if kind == 5 else 2
                 if offset + required > target['size']:
                     raise ValueError('relocation exceeds its section')
                 word = struct.unpack_from('<H', image, start)[0]
@@ -140,6 +140,11 @@ def link(paths, origin):
                         struct.pack_into('<H', image, at, (instruction & ~1) | ((value >> (15 - bit)) & 1))
                 elif kind == 4:
                     struct.pack_into('<H', image, start, value // 2)
+                elif kind == 5:
+                    value //= 2
+                    if not 0 <= value <= 0xffff:
+                        raise ValueError('word pointer exceeds 16 bits')
+                    struct.pack_into('<HH', image, start, value & 255, value >> 8)
                 else:
                     raise ValueError(f'unsupported private relocation {kind}')
     return image

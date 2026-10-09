@@ -5,8 +5,9 @@
 #error "nosuz16.h requires clang --target=nosuz16"
 #endif
 
-/* This scalar C frontend uses 16-bit int and eight-bit char. CPU addresses
- * are word-valued integers, independent of ordinary C byte pointers. */
+/* An eight-bit C byte occupies one CPU word, with upper storage bits zero.
+ * A 16-bit int or stored pointer occupies two words, low byte first.
+ * C pointers contain 16-bit word addresses. Raw word I/O uses full words. */
 typedef unsigned int nosuz16_word;
 
 /* Reads are observable even when discarded: FF00 consumes UART input.
@@ -26,7 +27,7 @@ extern void nosuz16_stw(nosuz16_word address, nosuz16_word value)
 int getc(void);
 int putc(int c);
 
-/* Literal formats only: %% %d %i %u %x %X %o %c and %s (literal strings).
+/* Literal formats only: %% %d %i %u %x %X %o %c and %s (C strings).
  * Integer arguments are 16-bit. No width, precision, length modifiers, or
  * floating-point formatting. Returns the number of bytes written. */
 int printf(const char *format, ...) __attribute__((format(printf, 1, 2)));

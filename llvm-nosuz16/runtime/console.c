@@ -34,3 +34,13 @@ int __nosuz16_print_signed(int value) {
   }
   return __nosuz16_print_unsigned((unsigned int)value, 10u, 0u);
 }
+
+int __nosuz16_print_string(unsigned int address) {
+  int count = 0;
+  unsigned int byte;
+  while ((byte = nosuz16_ldw(address++) & 0xffu) != 0u) {
+    putc(byte);
+    ++count;
+  }
+  return count;
+}

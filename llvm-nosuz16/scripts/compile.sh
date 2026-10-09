@@ -20,6 +20,9 @@ trap 'rm -rf -- "$temporary"' EXIT
 "$llvm_build/bin/clang" --target=nosuz16 -ffreestanding -fno-builtin -O2 \
   -I "$project_root/llvm-nosuz16/include" -c \
   "$project_root/llvm-nosuz16/runtime/console.c" -o "$temporary/console.o"
+"$llvm_build/bin/clang" --target=nosuz16 -ffreestanding -fno-builtin -O2 \
+  -I "$project_root/llvm-nosuz16/include" -c \
+  "$project_root/llvm-nosuz16/runtime/memory.c" -o "$temporary/memory.o"
 python3 "$project_root/llvm-nosuz16/scripts/image.py" \
   "$temporary/start.o" "$temporary/program.o" "$temporary/arithmetic.o" \
-  "$temporary/console.o" -o "$2"
+  "$temporary/console.o" "$temporary/memory.o" -o "$2"
