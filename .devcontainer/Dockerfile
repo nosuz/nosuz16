@@ -116,3 +116,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         --default-toolchain 1.85.1
 
 USER root
+
+RUN --mount=type=cache,target=/var/cache/apt \
+    --mount=type=cache,sharing=locked,target=/var/lib/apt \
+    apt-get update \
+    && apt-get install --no-install-recommends -y \
+    cmake ninja-build lld zlib1g-dev libzstd-dev

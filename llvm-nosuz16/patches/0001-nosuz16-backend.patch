@@ -1,0 +1,1364 @@
+diff --git a/llvm/include/llvm/IR/CMakeLists.txt b/llvm/include/llvm/IR/CMakeLists.txt
+index 5a7676b96..998dc41eb 100644
+--- a/llvm/include/llvm/IR/CMakeLists.txt
++++ b/llvm/include/llvm/IR/CMakeLists.txt
+@@ -7,6 +7,7 @@ tablegen(LLVM RuntimeLibcalls.inc -gen-runtime-libcalls)
+ set(LLVM_TARGET_DEFINITIONS Intrinsics.td)
+ tablegen(LLVM IntrinsicImpl.inc -gen-intrinsic-impl)
+ tablegen(LLVM IntrinsicEnums.inc -gen-intrinsic-enums)
++tablegen(LLVM IntrinsicsNosuz16.h -gen-intrinsic-enums -intrinsic-prefix=nosuz16)
+ tablegen(LLVM IntrinsicsAArch64.h -gen-intrinsic-enums -intrinsic-prefix=aarch64)
+ tablegen(LLVM IntrinsicsAMDGPU.h -gen-intrinsic-enums -intrinsic-prefix=amdgcn)
+ tablegen(LLVM IntrinsicsARM.h -gen-intrinsic-enums -intrinsic-prefix=arm)
+diff --git a/llvm/include/llvm/IR/Intrinsics.td b/llvm/include/llvm/IR/Intrinsics.td
+index 4494bf1e2..fd98cd7c7 100644
+--- a/llvm/include/llvm/IR/Intrinsics.td
++++ b/llvm/include/llvm/IR/Intrinsics.td
+@@ -2940,6 +2940,7 @@ def int_protected_field_ptr :
+ // Target-specific intrinsics
+ //===----------------------------------------------------------------------===//
+ 
++include "llvm/IR/IntrinsicsNosuz16.td"
+ include "llvm/IR/IntrinsicsPowerPC.td"
+ include "llvm/IR/IntrinsicsX86.td"
+ include "llvm/IR/IntrinsicsARM.td"
+diff --git a/llvm/include/llvm/IR/IntrinsicsNosuz16.td b/llvm/include/llvm/IR/IntrinsicsNosuz16.td
+new file mode 100644
+index 000000000..960121c4e
+--- /dev/null
++++ b/llvm/include/llvm/IR/IntrinsicsNosuz16.td
+@@ -0,0 +1,6 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++let TargetPrefix = "nosuz16" in {
++// Side effects and unknown memory effects deliberately preserve MMIO ordering.
++def int_nosuz16_ldw : Intrinsic<[llvm_i16_ty], [llvm_i16_ty], [IntrHasSideEffects]>;
++def int_nosuz16_stw : Intrinsic<[], [llvm_i16_ty, llvm_i16_ty], [IntrHasSideEffects]>;
++}
+diff --git a/llvm/include/llvm/IR/RuntimeLibcalls.td b/llvm/include/llvm/IR/RuntimeLibcalls.td
+index 8414c5abe..ad4c0c94e 100644
+--- a/llvm/include/llvm/IR/RuntimeLibcalls.td
++++ b/llvm/include/llvm/IR/RuntimeLibcalls.td
+@@ -71,6 +71,7 @@ def IsAVR : LibcallPredicate<[{TT.getArch() == Triple::avr}]>;
+ def IsDXIL : LibcallPredicate<[{TT.isDXIL()}]>;
+ def IsHexagon : LibcallPredicate<[{TT.getArch() == Triple::hexagon}]>;
+ def IsLanai : LibcallPredicate<[{TT.getArch() == Triple::lanai}]>;
++def IsNosuz16 : LibcallPredicate<[{TT.getArch() == Triple::nosuz16}]>;
+ def IsMSP430 : LibcallPredicate<[{TT.getArch() == Triple::msp430}]>;
+ def IsNVPTX : LibcallPredicate<[{TT.isNVPTX()}]>;
+ 
+@@ -3695,6 +3696,15 @@ def WasmSystemLibrary
+                              __small_fprintf), isOSEmscripten>,
+            __stack_chk_fail, __stack_chk_guard)>;
+ 
++//===----------------------------------------------------------------------===//
++// Nosuz16 Runtime Libcalls
++//===----------------------------------------------------------------------===//
++
++def isNosuz16 : RuntimeLibcallAvailability<(all_of IsNosuz16)>;
++def Nosuz16SystemLibrary
++    : SystemRuntimeLibrary<isNosuz16,
++      (add __mulhi3, __divhi3, __udivhi3, __modhi3, __umodhi3)>;
++
+ //===----------------------------------------------------------------------===//
+ // Legacy Default Runtime Libcalls
+ //===----------------------------------------------------------------------===//
+diff --git a/llvm/include/llvm/TargetParser/Triple.h b/llvm/include/llvm/TargetParser/Triple.h
+index 98760af2a..e0d229490 100644
+--- a/llvm/include/llvm/TargetParser/Triple.h
++++ b/llvm/include/llvm/TargetParser/Triple.h
+@@ -70,6 +70,7 @@ public:
+     mips64,      // MIPS64: mips64, mips64r6, mipsn32, mipsn32r6
+     mips64el,    // MIPS64EL: mips64el, mips64r6el, mipsn32el, mipsn32r6el
+     msp430,      // MSP430: msp430
++    nosuz16,     // Nosuz16 word-addressed CPU
+     ppc,         // PPC: powerpc
+     ppcle,       // PPCLE: powerpc (little endian)
+     ppc64,       // PPC64: powerpc64, ppu
+diff --git a/llvm/lib/Target/Nosuz16/AsmParser/CMakeLists.txt b/llvm/lib/Target/Nosuz16/AsmParser/CMakeLists.txt
+new file mode 100644
+index 000000000..02bc01fe2
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/AsmParser/CMakeLists.txt
+@@ -0,0 +1,2 @@
++add_llvm_component_library(LLVMNosuz16AsmParser Nosuz16AsmParser.cpp
++ LINK_COMPONENTS MC MCParser Nosuz16Info Support ADD_TO_COMPONENT Nosuz16)
+diff --git a/llvm/lib/Target/Nosuz16/AsmParser/Nosuz16AsmParser.cpp b/llvm/lib/Target/Nosuz16/AsmParser/Nosuz16AsmParser.cpp
+new file mode 100644
+index 000000000..8480d8dec
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/AsmParser/Nosuz16AsmParser.cpp
+@@ -0,0 +1,100 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++#include "MCTargetDesc/Nosuz16MC.h"
++#include "llvm/CodeGen/ISDOpcodes.h"
++#include "TargetInfo/Nosuz16TargetInfo.h"
++#include "llvm/MC/MCContext.h"
++#include "llvm/MC/MCExpr.h"
++#include "llvm/MC/MCInst.h"
++#include "llvm/MC/MCParser/MCAsmParser.h"
++#include "llvm/MC/MCParser/MCParsedAsmOperand.h"
++#include "llvm/MC/MCParser/MCTargetAsmParser.h"
++#include "llvm/MC/MCStreamer.h"
++#include "llvm/MC/TargetRegistry.h"
++#include "llvm/Support/MathExtras.h"
++using namespace llvm;
++namespace {
++struct Packet : MCParsedAsmOperand {
++ SmallVector<MCInst,3> Instructions;SMLoc Loc;
++ bool isToken() const override{return false;}bool isReg() const override{return false;}bool isImm() const override{return false;}bool isMem() const override{return false;}
++ MCRegister getReg() const override{return MCRegister();}
++ SMLoc getStartLoc() const override{return Loc;}SMLoc getEndLoc() const override{return Loc;}
++ void print(raw_ostream &O, const MCAsmInfo &) const override{O<<"Nosuz16 instruction";}
++};
++class Parser : public MCTargetAsmParser {
++ bool comma(){return getParser().parseToken(AsmToken::Comma,"expected ','");}
++ bool reg(MCOperand &O){MCRegister R;SMLoc A,B;if(parseRegister(R,A,B))return true;O=MCOperand::createReg(R);return false;}
++ bool value(MCOperand &O,unsigned Bits=0,bool Signed=true) {
++  const MCExpr *E;if(getParser().parseExpression(E))return true;int64_t V;
++  if(E->evaluateAsAbsolute(V)) {
++   if(Bits && !(Signed?isIntN(Bits,V):isUIntN(Bits,V)))return Error(getParser().getTok().getLoc(),"immediate out of range");
++   O=MCOperand::createImm(V);
++  } else {if(Bits && Bits!=9)return Error(getParser().getTok().getLoc(),"expected constant immediate");O=MCOperand::createExpr(E);}
++  return false;
++ }
++public:
++ void convertToMapAndConstraints(unsigned, const OperandVector &) override {}
++ Parser(const MCSubtargetInfo &S,MCAsmParser &,const MCInstrInfo &I):MCTargetAsmParser(S,I) {}
++ ParseStatus tryParseRegister(MCRegister &R,SMLoc &A,SMLoc &B) override {
++  auto &P=getParser();A=B=P.getTok().getLoc();if(!P.getTok().is(AsmToken::Identifier))return ParseStatus::NoMatch;
++  std::string N=P.getTok().getString().lower();unsigned Id=8;
++  if(N.size()==2 && N[0]=='r' && N[1]>='0' && N[1]<='7')Id=N[1]-'0';
++  else if(N=="sp")Id=6;else if(N=="ra"||N=="lr")Id=7;else if(N=="zero")Id=0;
++  if(Id==8)return ParseStatus::NoMatch;R=Nosuz16::reg(Id);P.Lex();return ParseStatus::Success;
++ }
++ bool parseRegister(MCRegister &R,SMLoc &A,SMLoc &B) override {if(!tryParseRegister(R,A,B).isSuccess())return Error(A,"expected r0-r7 register");return false;}
++ bool parseInstruction(ParseInstructionInfo &,StringRef Mn,SMLoc Loc,OperandVector &Operands) override {
++  std::string N=Mn.lower();auto PacketPtr=std::make_unique<Packet>();PacketPtr->Loc=Loc;MCInst I;I.setLoc(Loc);
++  MCOperand A,B,C;unsigned Op=0;auto &P=getParser();
++  auto emit=[&](unsigned O,std::initializer_list<MCOperand> Args){MCInst X;X.setOpcode(O);X.setLoc(Loc);for(auto V:Args)X.addOperand(V);PacketPtr->Instructions.push_back(X);};
++  static const std::pair<const char *,unsigned> Binary[]={{"add",Nosuz16::ADD},{"sub",Nosuz16::SUB},{"addc",Nosuz16::ADDC},{"subc",Nosuz16::SUBC},{"and",Nosuz16::AND},{"or",Nosuz16::OR},{"xor",Nosuz16::XOR},{"mov",Nosuz16::MOV}};
++  for(auto [Name,O]:Binary)if(N==Name)Op=O;
++  if(Op){if(reg(A)||comma()||reg(B))return true;emit(Op,{A,B});}
++  else if(N=="sll"||N=="srl"||N=="asr"||N=="clr"||N=="inc"||N=="dec") {
++   if(reg(A))return true;
++   if(N=="clr")emit(Nosuz16::XOR,{A,A});
++   else if(N=="inc"||N=="dec")emit(Nosuz16::ADDI,{A,MCOperand::createImm(N=="inc"?1:-1)});
++   else emit(N=="sll"?Nosuz16::SLL:N=="srl"?Nosuz16::SRL:Nosuz16::ASR,{A});
++  } else if(N=="nop")emit(Nosuz16::JAL,{MCOperand::createReg(Nosuz16::R0),MCOperand::createImm(0)});
++  else if(N=="halt")emit(Nosuz16::HALT,{});
++  else if(N=="ret")emit(Nosuz16::RET,{});
++  else if(N=="addi"||N=="subi"||N=="li") {
++   if(reg(A)||comma()||value(B,N=="addi"?6:0))return true;
++   if(N=="subi"){if(!B.isImm()||B.getImm() < -31||B.getImm()>32)return Error(Loc,"SUBI range is -31..32");B=MCOperand::createImm(-B.getImm());}
++   if(N=="li"&&B.isImm()&&(B.getImm() < -32768||B.getImm()>65535))return Error(Loc,"LI value must fit a word");
++   emit(N=="li"?Nosuz16::LI:Nosuz16::ADDI,{A,B});
++  } else if(N=="ld"||N=="st") {
++   if(reg(A)||comma()||P.parseToken(AsmToken::LBrac,"expected '['")||reg(B))return true;
++   C=MCOperand::createImm(0);if(!P.getTok().is(AsmToken::RBrac)) {
++    if(!P.getTok().is(AsmToken::Plus)&&!P.getTok().is(AsmToken::Minus))return Error(Loc,"expected '+' or '-' offset");
++    if(P.getTok().is(AsmToken::Plus))P.Lex();if(value(C,6))return true;
++   }
++   if(P.parseToken(AsmToken::RBrac,"expected ']'") )return true;emit(N=="ld"?Nosuz16::LD:Nosuz16::ST,{A,B,C});
++  } else if(N=="jalr") {if(reg(A)||comma()||reg(B)||comma()||value(C,6))return true;emit(Nosuz16::JALR,{A,B,C});}
++  else if(N=="beq"||N=="bne"||N=="blt") {
++   if(reg(A)||comma()||reg(B)||comma()||value(C))return true;
++   if(C.isImm()&&!isInt<6>(C.getImm()))return Error(Loc,"branch offset out of range");
++   emit(N=="beq"?Nosuz16::BEQ:N=="bne"?Nosuz16::BNE:Nosuz16::BLT,{A,B,C});
++  } else if(N=="jal"||N=="jmp"||N=="call"||N=="ljmp"||N=="lcall") {
++   if(N=="jal"){if(reg(A)||comma())return true;}else A=MCOperand::createReg(N=="call"?Nosuz16::R7:Nosuz16::R0);
++   if(value(B))return true;
++   if((N=="jal"||N=="jmp"||N=="call")&&B.isImm()&&!isInt<9>(B.getImm()))return Error(Loc,"jump offset out of range");
++   if((N=="ljmp"||N=="lcall")&&B.isImm()&&!isUInt<16>(B.getImm()))return Error(Loc,"absolute jump address must be 0..65535");
++   if(N=="ljmp"||N=="lcall")emit(N=="ljmp"?Nosuz16::JMP:Nosuz16::CALL,{B});else emit(Nosuz16::JAL,{A,B});
++  } else if(N=="cmp") {
++   if(reg(A)||comma()||reg(B)||comma()||reg(C))return true;
++   if(C.getReg()==Nosuz16::R0||C.getReg()==A.getReg()||C.getReg()==B.getReg())return Error(Loc,"CMP scratch must differ from r0 and both inputs");
++   emit(Nosuz16::MOV,{C,A});emit(Nosuz16::SUB,{C,B});
++  } else if(N=="brcc") {
++   MCOperand D;if(reg(A)||comma()||reg(B)||comma()||value(C)||comma()||value(D))return true;
++   if(!C.isImm())return Error(Loc,"expected constant branch condition");
++   switch(C.getImm()){case ISD::SETEQ:case ISD::SETNE:case ISD::SETLT:case ISD::SETLE:case ISD::SETGT:case ISD::SETGE:break;default:return Error(Loc,"unsupported branch condition");}
++   emit(Nosuz16::BRCC,{A,B,C,D});
++  } else return Error(Loc,"unknown Nosuz16 instruction");
++  if(P.parseEOL())return true;Operands.push_back(std::move(PacketPtr));return false;
++ }
++ bool matchAndEmitInstruction(SMLoc,unsigned &Opcode,OperandVector &Operands,MCStreamer &Out,uint64_t &,bool) override {
++  auto &P=static_cast<Packet &>(*Operands[0]);for(auto &I:P.Instructions){Opcode=I.getOpcode();Out.emitInstruction(I,getSTI());}return false;
++ }
++};
++}
++extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeNosuz16AsmParser(){RegisterMCAsmParser<Parser> X(getTheNosuz16Target());}
+diff --git a/llvm/lib/Target/Nosuz16/CMakeLists.txt b/llvm/lib/Target/Nosuz16/CMakeLists.txt
+new file mode 100644
+index 000000000..3a3cb8177
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/CMakeLists.txt
+@@ -0,0 +1,13 @@
++add_llvm_component_group(Nosuz16)
++set(LLVM_TARGET_DEFINITIONS Nosuz16.td)
++tablegen(LLVM Nosuz16GenRegisterInfo.inc -gen-register-info)
++tablegen(LLVM Nosuz16GenInstrInfo.inc -gen-instr-info)
++tablegen(LLVM Nosuz16GenSubtargetInfo.inc -gen-subtarget)
++add_public_tablegen_target(Nosuz16CommonTableGen)
++add_llvm_target(Nosuz16CodeGen Nosuz16.cpp Nosuz16AsmPrinter.cpp
++ LINK_COMPONENTS AsmPrinter CodeGen CodeGenTypes Core MC Nosuz16Desc Nosuz16Info SelectionDAG Support Target TargetParser
++ ADD_TO_COMPONENT Nosuz16)
++add_subdirectory(TargetInfo)
++add_subdirectory(MCTargetDesc)
++add_subdirectory(AsmParser)
++add_subdirectory(Disassembler)
+diff --git a/llvm/lib/Target/Nosuz16/Disassembler/CMakeLists.txt b/llvm/lib/Target/Nosuz16/Disassembler/CMakeLists.txt
+new file mode 100644
+index 000000000..eedb281a2
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/Disassembler/CMakeLists.txt
+@@ -0,0 +1,2 @@
++add_llvm_component_library(LLVMNosuz16Disassembler Nosuz16Disassembler.cpp
++ LINK_COMPONENTS MC MCDisassembler Nosuz16Info Support ADD_TO_COMPONENT Nosuz16)
+diff --git a/llvm/lib/Target/Nosuz16/Disassembler/Nosuz16Disassembler.cpp b/llvm/lib/Target/Nosuz16/Disassembler/Nosuz16Disassembler.cpp
+new file mode 100644
+index 000000000..cfd867fe9
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/Disassembler/Nosuz16Disassembler.cpp
+@@ -0,0 +1,22 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++#include "MCTargetDesc/Nosuz16MC.h"
++#include "TargetInfo/Nosuz16TargetInfo.h"
++#include "llvm/MC/MCDisassembler/MCDisassembler.h"
++#include "llvm/MC/MCInst.h"
++#include "llvm/MC/TargetRegistry.h"
++using namespace llvm;
++namespace {
++class Decoder : public MCDisassembler {
++public:Decoder(const MCSubtargetInfo &S,MCContext &C):MCDisassembler(S,C) {}
++ DecodeStatus getInstruction(MCInst &I,uint64_t &Size,ArrayRef<uint8_t> B,uint64_t,raw_ostream &) const override {
++  Size=0;if(B.size()<2)return Fail;Size=2;unsigned W=B[0]|(unsigned(B[1])<<8),Op=W>>12,D=(W>>9)&7,S=(W>>6)&7,F=W&63;
++  auto R=[&](unsigned N){I.addOperand(MCOperand::createReg(Nosuz16::reg(N)));};
++  auto Imm=[&](unsigned V,unsigned Bits){I.addOperand(MCOperand::createImm(int16_t(V<<(16-Bits))>>(16-Bits)));};
++  if(!Op){static const unsigned Ops[]={Nosuz16::ADD,Nosuz16::SUB,Nosuz16::ADDC,Nosuz16::SUBC,Nosuz16::AND,Nosuz16::OR,Nosuz16::XOR,Nosuz16::SLL,Nosuz16::SRL,Nosuz16::ASR};if(F>9)return Fail;I.setOpcode(Ops[F]);R(D);if(F<7)R(S);return Success;}
++  static const unsigned Ops[]={0,Nosuz16::ADDI,Nosuz16::LD,Nosuz16::ST,Nosuz16::BEQ,Nosuz16::BNE,Nosuz16::BLT,Nosuz16::JAL,Nosuz16::JALR};
++  if(W==0xf000){I.setOpcode(Nosuz16::HALT);return Success;}if(Op>8)return Fail;
++  I.setOpcode(Ops[Op]);R(D);if(Op!=1&&Op!=7)R(S);Imm(Op==7?W&511:F,Op==7?9:6);return Success;
++ }
++};
++}
++extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeNosuz16Disassembler(){TargetRegistry::RegisterMCDisassembler(getTheNosuz16Target(),[](const Target &,const MCSubtargetInfo &S,MCContext &C)->MCDisassembler *{return new Decoder(S,C);});}
+diff --git a/llvm/lib/Target/Nosuz16/MCTargetDesc/CMakeLists.txt b/llvm/lib/Target/Nosuz16/MCTargetDesc/CMakeLists.txt
+new file mode 100644
+index 000000000..6df50d72d
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/MCTargetDesc/CMakeLists.txt
+@@ -0,0 +1,2 @@
++add_llvm_component_library(LLVMNosuz16Desc Nosuz16Desc.cpp
++ LINK_COMPONENTS MC Nosuz16Info Support ADD_TO_COMPONENT Nosuz16)
+diff --git a/llvm/lib/Target/Nosuz16/MCTargetDesc/Nosuz16Desc.cpp b/llvm/lib/Target/Nosuz16/MCTargetDesc/Nosuz16Desc.cpp
+new file mode 100644
+index 000000000..94664044d
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/MCTargetDesc/Nosuz16Desc.cpp
+@@ -0,0 +1,156 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++#include "Nosuz16MC.h"
++#include "TargetInfo/Nosuz16TargetInfo.h"
++#include "llvm/CodeGen/ISDOpcodes.h"
++#include "llvm/BinaryFormat/ELF.h"
++#include "llvm/MC/MCAsmBackend.h"
++#include "llvm/MC/MCAsmInfoELF.h"
++#include "llvm/MC/MCAssembler.h"
++#include "llvm/MC/MCCodeEmitter.h"
++#include "llvm/MC/MCContext.h"
++#include "llvm/MC/MCELFObjectWriter.h"
++#include "llvm/MC/MCExpr.h"
++#include "llvm/MC/MCInst.h"
++#include "llvm/MC/MCInstPrinter.h"
++#include "llvm/MC/MCInstrInfo.h"
++#include "llvm/MC/MCRegisterInfo.h"
++#include "llvm/MC/MCSubtargetInfo.h"
++#include "llvm/MC/TargetRegistry.h"
++#include "llvm/Support/MathExtras.h"
++#include "llvm/Support/raw_ostream.h"
++using namespace llvm;
++#define GET_REGINFO_MC_DESC
++#include "Nosuz16GenRegisterInfo.inc"
++#define GET_INSTRINFO_MC_DESC
++#include "Nosuz16GenInstrInfo.inc"
++#define GET_SUBTARGETINFO_MC_DESC
++#include "Nosuz16GenSubtargetInfo.inc"
++namespace {
++class AsmInfo : public MCAsmInfoELF {
++public:AsmInfo(const MCTargetOptions &O):MCAsmInfoELF(O) {
++ CodePointerSize=2;CalleeSaveStackSlotSize=2;CommentString="#";SupportsDebugInformation=false;MinInstAlignment=2;MaxInstLength=74;
++}
++};
++class Printer : public MCInstPrinter {
++ void operand(const MCOperand &O,raw_ostream &S) {
++  if(O.isReg())printRegName(S,O.getReg());else if(O.isImm())S<<O.getImm();else MAI.printExpr(S,*O.getExpr());
++ }
++public:Printer(const MCAsmInfo &A,const MCInstrInfo &I,const MCRegisterInfo &R):MCInstPrinter(A,I,R) {}
++ void printRegName(raw_ostream &O,MCRegister R) override {O<<StringRef(MRI.getName(R)).lower();}
++ std::pair<const char *,uint64_t> getMnemonic(const MCInst &I) const override{return {MII.getName(I.getOpcode()).data(),0};}
++ void printInst(const MCInst *I,uint64_t,StringRef Annot,const MCSubtargetInfo &,raw_ostream &O) override {
++  StringRef Name=MII.getName(I->getOpcode());
++  if(I->getOpcode()==Nosuz16::JMP)Name="ljmp";if(I->getOpcode()==Nosuz16::CALL)Name="lcall";
++  O<<'\t'<<Name.lower();
++  for(unsigned N=0;N<I->getNumOperands();++N) {
++   O<<(N?", ":" ");
++   if((I->getOpcode()==Nosuz16::LD||I->getOpcode()==Nosuz16::ST)&&N==1) {
++    O<<'[';operand(I->getOperand(N),O);O<<" + ";operand(I->getOperand(N+1),O);O<<']';break;
++   }
++   operand(I->getOperand(N),O);
++  }
++  printAnnotation(O,Annot);
++ }
++};
++class Emitter : public MCCodeEmitter {
++ MCContext &Ctx;const MCRegisterInfo &MRI;
++ void word(unsigned W,SmallVectorImpl<char> &B) const {B.push_back(W&255);B.push_back((W>>8)&255);}
++ unsigned r(const MCInst &I,unsigned N) const {return MRI.getEncodingValue(I.getOperand(N).getReg());}
++ int64_t imm(const MCInst &I,unsigned N,unsigned Bits) const {
++  if(!I.getOperand(N).isImm()){Ctx.reportError(I.getLoc(),"expected immediate");return 0;}
++  int64_t V=I.getOperand(N).getImm();if(!isIntN(Bits,V))Ctx.reportError(I.getLoc(),"immediate out of range");return V;
++ }
++ void load(unsigned R,const MCOperand &V,SmallVectorImpl<char> &B,SmallVectorImpl<MCFixup> &F) const {
++  unsigned Offset=B.size();unsigned Value=V.isImm()?V.getImm():0;
++  if(V.isExpr())F.push_back(MCFixup::create(Offset,V.getExpr(),(MCFixupKind)Nosuz16::ADDRESS16));
++  word((R<<9)|(R<<6)|6,B);
++  for(int Bit=15;Bit>=0;--Bit){word((R<<9)|7,B);word(0x1000|(R<<9)|(R<<6)|((Value>>Bit)&1),B);}
++ }
++ void longJump(unsigned R,unsigned Link,const MCOperand &Dst,SmallVectorImpl<char> &B,SmallVectorImpl<MCFixup> &F) const {load(R,Dst,B,F);word(0x8000|(Link<<9)|(R<<6),B);}
++public:Emitter(MCContext &C,const MCRegisterInfo &R):Ctx(C),MRI(R) {}
++ void encodeInstruction(const MCInst &I,SmallVectorImpl<char> &B,SmallVectorImpl<MCFixup> &F,const MCSubtargetInfo &) const override {
++  unsigned Op=I.getOpcode(),Fun=0;
++  switch(Op) {
++#define A(X,V) case Nosuz16::X:Fun=V;break;
++   A(ADD,0) A(SUB,1) A(ADDC,2) A(SUBC,3) A(AND,4) A(OR,5) A(XOR,6)
++#undef A
++   case Nosuz16::SLL:word((r(I,0)<<9)|7,B);return;
++   case Nosuz16::SRL:word((r(I,0)<<9)|8,B);return;
++   case Nosuz16::ASR:word((r(I,0)<<9)|9,B);return;
++   case Nosuz16::MOV:{unsigned D=r(I,0),S=r(I,1);if(D==S)word(0x1000|(D<<9)|(D<<6),B);else{word((D<<9)|(D<<6)|6,B);word((D<<9)|(S<<6),B);}return;}
++   case Nosuz16::LI:load(r(I,0),I.getOperand(1),B,F);return;
++   case Nosuz16::JMP:longJump(5,0,I.getOperand(0),B,F);return;
++   case Nosuz16::CALL:longJump(7,7,I.getOperand(0),B,F);return;
++   case Nosuz16::RET:word(0x81c0,B);return;
++   case Nosuz16::HALT:word(0xf000,B);return;
++   case Nosuz16::ADDI:word(0x1000|(r(I,0)<<9)|(r(I,0)<<6)|(imm(I,1,6)&63),B);return;
++   case Nosuz16::LD:case Nosuz16::ST:word((Op==Nosuz16::LD?0x2000:0x3000)|(r(I,0)<<9)|(r(I,1)<<6)|(imm(I,2,6)&63),B);return;
++   case Nosuz16::JALR:word(0x8000|(r(I,0)<<9)|(r(I,1)<<6)|(imm(I,2,6)&63),B);return;
++   case Nosuz16::BEQ:case Nosuz16::BNE:case Nosuz16::BLT:case Nosuz16::JAL:{
++    bool Jump=Op==Nosuz16::JAL;unsigned Bits=Jump?9:6,Index=Jump?1:2;
++    unsigned W=Jump?0x7000:Op==Nosuz16::BEQ?0x4000:Op==Nosuz16::BNE?0x5000:0x6000;
++    W|=r(I,0)<<9;if(!Jump)W|=r(I,1)<<6;
++    auto &V=I.getOperand(Index);
++    if(V.isImm())W|=imm(I,Index,Bits)&((1<<Bits)-1);
++    else F.push_back(MCFixup::create(B.size(),V.getExpr(),(MCFixupKind)(Jump?Nosuz16::PC9:Nosuz16::PC6),true));
++    word(W,B);return;
++   }
++   case Nosuz16::BRCC:{
++    auto CC=(ISD::CondCode)I.getOperand(2).getImm();unsigned A=r(I,0),D=r(I,1),Code=0x6000;bool Invert=false;
++    switch(CC){case ISD::SETEQ:Code=0x4000;break;case ISD::SETNE:Code=0x5000;break;case ISD::SETLT:break;case ISD::SETGT:std::swap(A,D);break;case ISD::SETGE:Invert=true;break;case ISD::SETLE:std::swap(A,D);Invert=true;break;default:Ctx.reportError(I.getLoc(),"unsupported branch condition");return;}
++    word(Code|(A<<9)|(D<<6)|1,B);
++    if(Invert){word(0x7001,B);word(0x7022,B);}else word(0x7022,B);
++    longJump(5,0,I.getOperand(3),B,F);return;
++   }
++   default:Ctx.reportError(I.getLoc(),"unsupported Nosuz16 instruction");return;
++  }
++  word((r(I,0)<<9)|(r(I,1)<<6)|Fun,B);
++ }
++};
++// Private transport object, not a registered public ELF ABI. image.py consumes it.
++class ObjectWriter : public MCELFObjectTargetWriter {
++public:ObjectWriter():MCELFObjectTargetWriter(false,0,ELF::EM_NONE,true) {}
++ unsigned getRelocType(const MCFixup &F,const MCValue &,bool) const override {
++  switch(F.getKind()){case Nosuz16::PC6:return 1;case Nosuz16::PC9:return 2;case Nosuz16::ADDRESS16:return 3;case FK_Data_2:return 4;default:report_fatal_error("Nosuz16: unsupported relocation",false);}
++ }
++};
++class Backend : public MCAsmBackend {
++public:Backend():MCAsmBackend(endianness::little) {}
++ std::unique_ptr<MCObjectTargetWriter> createObjectTargetWriter() const override{return std::make_unique<ObjectWriter>();}
++ MCFixupKindInfo getFixupKindInfo(MCFixupKind K) const override {
++  if(K<FirstTargetFixupKind)return MCAsmBackend::getFixupKindInfo(K);
++  static const MCFixupKindInfo T[]={{"n16_pc6",0,6,0},{"n16_pc9",0,9,0},{"n16_addr16",0,16,0}};
++  return T[K-FirstTargetFixupKind];
++ }
++ void applyFixup(const MCFragment &F,const MCFixup &Fix,const MCValue &T,uint8_t *Data,uint64_t Value,bool Resolved) override {
++  maybeAddReloc(F,Fix,T,Value,Resolved);
++  if(!Resolved)return;
++  unsigned K=Fix.getKind();
++  if(K==Nosuz16::ADDRESS16) {
++   if(Value&1){getContext().reportError(SMLoc(),"unaligned word target");return;}
++   if(Value/2>65535){getContext().reportError(SMLoc(),"word target exceeds address space");return;}
++   Value/=2;
++   for(unsigned I=0;I<16;++I){unsigned At=(2+I*2)*2;Data[At]=(Data[At]&~1)|((Value>>(15-I))&1);}
++   return;
++  }
++  if(K==Nosuz16::PC6||K==Nosuz16::PC9) {
++   if(Value&1){getContext().reportError(SMLoc(),"unaligned branch target");return;}
++   int64_t Offset=(int64_t(Value)-2)/2;unsigned Bits=K==Nosuz16::PC6?6:9;
++   if(!isIntN(Bits,Offset)){getContext().reportError(SMLoc(),"branch offset out of range");return;}
++   Value=Offset&((1<<Bits)-1);
++  }
++  Data[0]|=Value&255;Data[1]|=(Value>>8)&255;
++ }
++ bool writeNopData(raw_ostream &O,uint64_t N,const MCSubtargetInfo *) const override {if(N%2)return false;while(N){O.write("\x00\x70",2);N-=2;}return true;}
++};
++}
++extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeNosuz16TargetMC() {
++ auto &T=getTheNosuz16Target();
++ TargetRegistry::RegisterMCAsmInfo(T,[](const MCRegisterInfo &,const Triple &,const MCTargetOptions &O)->MCAsmInfo *{return new AsmInfo(O);});
++ TargetRegistry::RegisterMCInstrInfo(T,[](){auto *I=new MCInstrInfo();InitNosuz16MCInstrInfo(I);return I;});
++ TargetRegistry::RegisterMCRegInfo(T,[](const Triple &){auto *R=new MCRegisterInfo();InitNosuz16MCRegisterInfo(R,Nosuz16::R7);return R;});
++ TargetRegistry::RegisterMCSubtargetInfo(T,[](const Triple &TT,StringRef C,StringRef F){return createNosuz16MCSubtargetInfoImpl(TT,C.empty()?"generic":C,C.empty()?"generic":C,F);});
++ TargetRegistry::RegisterMCInstPrinter(T,[](const Triple &,unsigned,const MCAsmInfo &A,const MCInstrInfo &I,const MCRegisterInfo &R)->MCInstPrinter *{return new Printer(A,I,R);});
++ TargetRegistry::RegisterMCCodeEmitter(T,[](const MCInstrInfo &,MCContext &C)->MCCodeEmitter *{return new Emitter(C,*C.getRegisterInfo());});
++ TargetRegistry::RegisterMCAsmBackend(T,[](const Target &,const MCSubtargetInfo &,const MCRegisterInfo &,const MCTargetOptions &)->MCAsmBackend *{return new Backend();});
++}
+diff --git a/llvm/lib/Target/Nosuz16/MCTargetDesc/Nosuz16MC.h b/llvm/lib/Target/Nosuz16/MCTargetDesc/Nosuz16MC.h
+new file mode 100644
+index 000000000..949d284c3
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/MCTargetDesc/Nosuz16MC.h
+@@ -0,0 +1,11 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++#pragma once
++#include "llvm/MC/MCFixup.h"
++#define GET_REGINFO_ENUM
++#include "Nosuz16GenRegisterInfo.inc"
++#define GET_INSTRINFO_ENUM
++#include "Nosuz16GenInstrInfo.inc"
++namespace llvm { namespace Nosuz16 {
++enum Fixups { PC6=FirstTargetFixupKind, PC9, ADDRESS16, NUM_FIXUPS };
++inline unsigned reg(unsigned N) { static const unsigned R[]={R0,R1,R2,R3,R4,R5,R6,R7}; return R[N]; }
++} }
+diff --git a/llvm/lib/Target/Nosuz16/Nosuz16.cpp b/llvm/lib/Target/Nosuz16/Nosuz16.cpp
+new file mode 100644
+index 000000000..d8470f4da
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/Nosuz16.cpp
+@@ -0,0 +1,362 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++#include "Nosuz16.h"
++#include "TargetInfo/Nosuz16TargetInfo.h"
++#include "llvm/CodeGen/AsmPrinter.h"
++#include "llvm/CodeGen/MachineFrameInfo.h"
++#include "llvm/CodeGen/MachineInstrBuilder.h"
++#include "llvm/CodeGen/MachineRegisterInfo.h"
++#include "llvm/CodeGen/SelectionDAGISel.h"
++#include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
++#include "llvm/CodeGen/TargetPassConfig.h"
++#include "llvm/IR/InstIterator.h"
++#include "llvm/IR/Instructions.h"
++#include "llvm/IR/IntrinsicsNosuz16.h"
++#include "llvm/MC/MCInst.h"
++#include "llvm/MC/MCExpr.h"
++#include "llvm/MC/MCStreamer.h"
++#include "llvm/MC/TargetRegistry.h"
++#include "llvm/Support/ErrorHandling.h"
++using namespace llvm;
++#define DEBUG_TYPE "nosuz16"
++#define GET_REGINFO_TARGET_DESC
++#include "Nosuz16GenRegisterInfo.inc"
++#define GET_INSTRINFO_CTOR_DTOR
++#include "Nosuz16GenInstrInfo.inc"
++#define GET_SUBTARGETINFO_TARGET_DESC
++#define GET_SUBTARGETINFO_CTOR
++#include "Nosuz16GenSubtargetInfo.inc"
++static void adjustSP(MachineBasicBlock &B,MachineBasicBlock::iterator I,int64_t Words,const DebugLoc &DL) {
++ const auto &TII=*B.getParent()->getSubtarget().getInstrInfo();
++ while (Words) {
++  int64_t N=std::clamp<int64_t>(Words,-32,31);
++  BuildMI(B,I,DL,TII.get(Nosuz16::ADDI),Nosuz16::R6).addReg(Nosuz16::R6).addImm(N);
++  Words-=N;
++ }
++}
++N16RegisterInfo::N16RegisterInfo():Nosuz16GenRegisterInfo(Nosuz16::R7) {}
++const MCPhysReg *N16RegisterInfo::getCalleeSavedRegs(const MachineFunction *) const { return CSR_Function_SaveList; }
++const uint32_t *N16RegisterInfo::getCallPreservedMask(const MachineFunction &,CallingConv::ID) const { return CSR_ABI_RegMask; }
++BitVector N16RegisterInfo::getReservedRegs(const MachineFunction &) const {
++ BitVector B(getNumRegs());
++ for(unsigned R:{Nosuz16::R0,Nosuz16::R5,Nosuz16::R6,Nosuz16::R7,Nosuz16::STATUS}) B.set(R);
++ return B;
++}
++bool N16RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator I,int SPAdj,unsigned Op,RegScavenger *) const {
++ MachineInstr &MI=*I; auto &B=*MI.getParent(); auto &F=B.getParent()->getFrameInfo();
++ int64_t Bytes=F.getObjectOffset(MI.getOperand(Op).getIndex())+F.getStackSize()+SPAdj;
++ if(Bytes%2) report_fatal_error("Nosuz16: unaligned stack slot",false);
++ int64_t W=Bytes/2+MI.getOperand(Op+1).getImm();
++ MI.getOperand(Op).ChangeToRegister(Nosuz16::R6,false);
++ if(isInt<6>(W)) MI.getOperand(Op+1).setImm(W);
++ else {
++  // Moving SP avoids an unspillable scratch register, including saving R5.
++  adjustSP(B,I,W,MI.getDebugLoc()); MI.getOperand(Op+1).setImm(0);
++  adjustSP(B,std::next(I),-W,MI.getDebugLoc());
++ }
++ return false;
++}
++N16InstrInfo::N16InstrInfo(const TargetSubtargetInfo &ST):Nosuz16GenInstrInfo(ST,RI,Nosuz16::ADJCALLSTACKDOWN,Nosuz16::ADJCALLSTACKUP) {}
++void N16InstrInfo::copyPhysReg(MachineBasicBlock &B,MachineBasicBlock::iterator I,const DebugLoc &DL,Register D,Register S,bool K,bool,bool) const {
++ if(D!=S) BuildMI(B,I,DL,get(Nosuz16::MOV),D).addReg(S,getKillRegState(K));
++}
++void N16InstrInfo::storeRegToStackSlot(MachineBasicBlock &B,MachineBasicBlock::iterator I,Register S,bool K,int FI,const TargetRegisterClass *,Register,MachineInstr::MIFlag Flags) const {
++ BuildMI(B,I,DebugLoc(),get(Nosuz16::ST)).addReg(S,getKillRegState(K)).addFrameIndex(FI).addImm(0).setMIFlag(Flags);
++}
++void N16InstrInfo::loadRegFromStackSlot(MachineBasicBlock &B,MachineBasicBlock::iterator I,Register D,int FI,const TargetRegisterClass *,Register,unsigned,MachineInstr::MIFlag Flags) const {
++ BuildMI(B,I,DebugLoc(),get(Nosuz16::LD),D).addFrameIndex(FI).addImm(0).setMIFlag(Flags);
++}
++bool N16InstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
++ if(MI.getOpcode()!=Nosuz16::LDSP && MI.getOpcode()!=Nosuz16::STSP)return false;
++ auto &B=*MI.getParent();auto I=MI.getIterator();auto L=MI.getDebugLoc();
++ int64_t Words=MI.getOperand(2).getImm();
++ adjustSP(B,I,Words,L);
++ BuildMI(B,I,L,get(MI.getOpcode()==Nosuz16::LDSP?Nosuz16::LD:Nosuz16::ST)).add(MI.getOperand(0)).add(MI.getOperand(1)).addImm(0).cloneMemRefs(MI);
++ adjustSP(B,std::next(I),-Words,L);
++ MI.eraseFromParent();return true;
++}
++bool N16InstrInfo::analyzeBranch(MachineBasicBlock &B,MachineBasicBlock *&T,MachineBasicBlock *&F,SmallVectorImpl<MachineOperand> &C,bool) const {
++ T=F=nullptr; C.clear();
++ for(auto I=B.rbegin();I!=B.rend()&&I->isTerminator();++I) {
++  if(I->getOpcode()==Nosuz16::JMP) { if(T) return true; T=I->getOperand(0).getMBB(); }
++  else if(I->getOpcode()==Nosuz16::BRCC) {
++   if(!C.empty()) return true; F=T; T=I->getOperand(3).getMBB();
++   C.push_back(I->getOperand(0)); C.push_back(I->getOperand(1)); C.push_back(I->getOperand(2));
++  } else return true;
++ }
++ return false;
++}
++unsigned N16InstrInfo::insertBranch(MachineBasicBlock &B,MachineBasicBlock *T,MachineBasicBlock *F,ArrayRef<MachineOperand> C,const DebugLoc &DL,int *Bytes) const {
++ unsigned N=0,Size=0;
++ if(C.empty()) { BuildMI(B,B.end(),DL,get(Nosuz16::JMP)).addMBB(T); N=1; Size=68; }
++ else {
++  BuildMI(B,B.end(),DL,get(Nosuz16::BRCC)).add(C[0]).add(C[1]).add(C[2]).addMBB(T); N=1; Size=C[2].getImm()==ISD::SETGE||C[2].getImm()==ISD::SETLE?74:72;
++  if(F) { BuildMI(B,B.end(),DL,get(Nosuz16::JMP)).addMBB(F); ++N;Size+=68; }
++ }
++ if(Bytes)*Bytes=Size;return N;
++}
++unsigned N16InstrInfo::removeBranch(MachineBasicBlock &B,int *Bytes) const {
++ unsigned N=0,S=0;
++ while(!B.empty() && (B.back().getOpcode()==Nosuz16::JMP || B.back().getOpcode()==Nosuz16::BRCC)) {
++  S+=getInstSizeInBytes(B.back());B.back().eraseFromParent();++N;
++ }
++ if(Bytes)*Bytes=S; return N;
++}
++bool N16InstrInfo::isBranchOffsetInRange(unsigned Op,int64_t Offset) const {
++ if(Offset%2)return false;
++ if(Op==Nosuz16::BEQ||Op==Nosuz16::BNE||Op==Nosuz16::BLT)return isInt<6>((Offset-2)/2);
++ if(Op==Nosuz16::JAL)return isInt<9>((Offset-2)/2);
++ return Offset>=-131070 && Offset<=131070;
++}
++MachineBasicBlock *N16InstrInfo::getBranchDestBlock(const MachineInstr &MI) const {
++ unsigned Op=MI.getOpcode();
++ unsigned Index=Op==Nosuz16::BRCC?3:Op==Nosuz16::JAL?1:Op==Nosuz16::BEQ||Op==Nosuz16::BNE||Op==Nosuz16::BLT?2:0;
++ return MI.getOperand(Index).getMBB();
++}
++unsigned N16InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
++ if(MI.getOpcode()==Nosuz16::LDSP||MI.getOpcode()==Nosuz16::STSP) {
++  uint64_t Words=std::abs(MI.getOperand(2).getImm());
++  return 2+2*((Words+30)/31+(Words+31)/32);
++ }
++ if(MI.getOpcode()==Nosuz16::BRCC) {
++  auto CC=(ISD::CondCode)MI.getOperand(2).getImm();
++  return CC==ISD::SETGE||CC==ISD::SETLE?74:72;
++ }
++ if(MI.getOpcode()==Nosuz16::MOV && MI.getOperand(0).getReg()==MI.getOperand(1).getReg())return 2;
++ return MI.getDesc().getSize();
++}
++bool N16InstrInfo::reverseBranchCondition(SmallVectorImpl<MachineOperand> &C) const {
++ C[2].setImm(ISD::getSetCCInverse((ISD::CondCode)C[2].getImm(),MVT::i16));return false;
++}
++void Nosuz16FrameLowering::emitPrologue(MachineFunction &MF,MachineBasicBlock &B) const {
++ auto &F=MF.getFrameInfo();
++ if(F.hasVarSizedObjects()) report_fatal_error("Nosuz16: dynamic stack allocation is unsupported",false);
++ if(F.getStackSize()>65534)report_fatal_error("Nosuz16: stack frame exceeds address space",false);
++ adjustSP(B,B.begin(),-int64_t(F.getStackSize()/2),DebugLoc());
++}
++void Nosuz16FrameLowering::emitEpilogue(MachineFunction &MF,MachineBasicBlock &B) const {
++ adjustSP(B,B.getLastNonDebugInstr(),MF.getFrameInfo().getStackSize()/2,DebugLoc());
++}
++MachineBasicBlock::iterator Nosuz16FrameLowering::eliminateCallFramePseudoInstr(MachineFunction &,MachineBasicBlock &B,MachineBasicBlock::iterator I) const {return B.erase(I);}
++Nosuz16Subtarget::Nosuz16Subtarget(const Triple &T,StringRef CPU,StringRef FS,const TargetMachine &TM):Nosuz16GenSubtargetInfo(T,CPU.empty()?"generic":CPU,CPU.empty()?"generic":CPU,FS),II(*this),TL(TM,*this) { ParseSubtargetFeatures(CPU.empty()?"generic":CPU,CPU.empty()?"generic":CPU,FS); }
++N16TargetMachine::N16TargetMachine(const Target &T,const Triple &TT,StringRef CPU,StringRef FS,const TargetOptions &O,std::optional<Reloc::Model> R,std::optional<CodeModel::Model> C,CodeGenOptLevel L,bool):CodeGenTargetMachineImpl(T,TT,CPU,FS,O,R.value_or(Reloc::Static),C.value_or(CodeModel::Small),L),OF(std::make_unique<TargetLoweringObjectFileELF>()),ST(TT,CPU,FS,*this) { initAsmInfo(); }
++N16TargetMachine::~N16TargetMachine()=default;
++N16Lowering::N16Lowering(const TargetMachine &TM,const Nosuz16Subtarget &ST):TargetLowering(TM,ST) {
++ addRegisterClass(MVT::i16,&Nosuz16::GPRRegClass); computeRegisterProperties(ST.getRegisterInfo());
++ setStackPointerRegisterToSaveRestore(Nosuz16::R6);
++ setBooleanContents(ZeroOrOneBooleanContent);
++ setOperationAction(ISD::SIGN_EXTEND_INREG,MVT::i1,Expand);
++ setOperationAction(ISD::SIGN_EXTEND_INREG,MVT::i8,Expand);
++ setOperationAction(ISD::BR_CC,MVT::i16,Custom);
++ setOperationAction(ISD::BRCOND,MVT::Other,Expand);
++ setOperationAction(ISD::SETCC,MVT::i16,Custom);
++ setOperationAction(ISD::SELECT,MVT::i16,Expand);
++ setOperationAction(ISD::SELECT_CC,MVT::i16,Custom);
++ for(unsigned Op:{ISD::SHL,ISD::SRL,ISD::SRA}) setOperationAction(Op,MVT::i16,Custom);
++ setOperationAction(ISD::INTRINSIC_W_CHAIN,MVT::Other,Custom);
++ setOperationAction(ISD::INTRINSIC_VOID,MVT::Other,Custom);
++ for(unsigned Op:{ISD::MUL,ISD::SDIV,ISD::UDIV,ISD::SREM,ISD::UREM,ISD::SDIVREM,ISD::UDIVREM,ISD::MULHS,ISD::MULHU,ISD::SMUL_LOHI,ISD::UMUL_LOHI})setOperationAction(Op,MVT::i16,Expand);
++ for(unsigned Op:{ISD::SIGN_EXTEND_INREG,ISD::ROTL,ISD::ROTR,ISD::BSWAP,ISD::BITREVERSE,ISD::CTPOP,ISD::CTLZ,ISD::CTTZ,ISD::CTLZ_ZERO_POISON,ISD::CTTZ_ZERO_POISON,ISD::SMIN,ISD::SMAX,ISD::UMIN,ISD::UMAX})setOperationAction(Op,MVT::i16,Expand);
++ setOperationAction(ISD::BR_JT,MVT::Other,Expand);
++ setOperationAction(ISD::GlobalAddress,MVT::i16,Custom);
++}
++const char *N16Lowering::getTargetNodeName(unsigned Op) const {
++ switch(Op) {
++#define N(X) case N16ISD::X:return "N16ISD::" #X;
++ N(RET) N(CALL) N(BRCC) N(SELECT) N(SHL) N(SRL) N(SRA) N(SHL1) N(SRL1) N(SRA1) N(LDW) N(STW)
++#undef N
++ default:return nullptr;
++ }
++}
++static void signedCondition(SDValue &A,SDValue &B,ISD::CondCode &CC,SelectionDAG &D,const SDLoc &L) {
++ if(ISD::isUnsignedIntSetCC(CC)) {
++  SDValue Bias=D.getConstant(0x8000,L,MVT::i16);
++  A=D.getNode(ISD::XOR,L,MVT::i16,A,Bias); B=D.getNode(ISD::XOR,L,MVT::i16,B,Bias);
++  switch(CC) {case ISD::SETULT:CC=ISD::SETLT;break;case ISD::SETULE:CC=ISD::SETLE;break;case ISD::SETUGT:CC=ISD::SETGT;break;case ISD::SETUGE:CC=ISD::SETGE;break;default:llvm_unreachable("unsigned CC");}
++ }
++}
++SDValue N16Lowering::LowerOperation(SDValue O,SelectionDAG &D) const {
++ SDLoc L(O);auto C=[&](int64_t V){return D.getTargetConstant(V,L,MVT::i16);};
++ switch(O.getOpcode()) {
++ case ISD::BR_CC: {
++  auto CC=cast<CondCodeSDNode>(O.getOperand(1))->get(); SDValue A=O.getOperand(2),B=O.getOperand(3);
++  signedCondition(A,B,CC,D,L);return D.getNode(N16ISD::BRCC,L,MVT::Other,O.getOperand(0),A,B,C(CC),O.getOperand(4));
++ }
++ case ISD::SETCC: case ISD::SELECT_CC: {
++  SDValue A=O.getOperand(0),B=O.getOperand(1),T,F;ISD::CondCode CC;
++  if(O.getOpcode()==ISD::SETCC) {CC=cast<CondCodeSDNode>(O.getOperand(2))->get();T=D.getConstant(1,L,MVT::i16);F=D.getConstant(0,L,MVT::i16);}
++  else {T=O.getOperand(2);F=O.getOperand(3);CC=cast<CondCodeSDNode>(O.getOperand(4))->get();}
++  signedCondition(A,B,CC,D,L);
++  return D.getNode(N16ISD::SELECT,L,MVT::i16,A,B,C(CC),T,F);
++ }
++ case ISD::SHL:case ISD::SRL:case ISD::SRA:
++  if(auto *Amount=dyn_cast<ConstantSDNode>(O.getOperand(1))) {
++   unsigned Count=std::min<uint64_t>(Amount->getZExtValue(),16);
++   SDValue Result=O.getOperand(0);
++   unsigned Op=O.getOpcode()==ISD::SHL?N16ISD::SHL1:O.getOpcode()==ISD::SRL?N16ISD::SRL1:N16ISD::SRA1;
++   for(unsigned I=0;I<Count;++I)Result=D.getNode(Op,L,MVT::i16,Result);
++   return Result;
++  }
++  return D.getNode(O.getOpcode()==ISD::SHL?N16ISD::SHL:O.getOpcode()==ISD::SRL?N16ISD::SRL:N16ISD::SRA,L,MVT::i16,O.getOperand(0),O.getOperand(1));
++ case ISD::INTRINSIC_W_CHAIN:case ISD::INTRINSIC_VOID: {
++  unsigned ID=O.getOperand(1)->getAsZExtVal();
++  if(ID==Intrinsic::nosuz16_ldw)return D.getNode(N16ISD::LDW,L,D.getVTList(MVT::i16,MVT::Other),O.getOperand(2),O.getOperand(0));
++  if(ID==Intrinsic::nosuz16_stw)return D.getNode(N16ISD::STW,L,MVT::Other,O.getOperand(3),O.getOperand(2),O.getOperand(0));
++  report_fatal_error("Nosuz16: unsupported intrinsic",false);
++ }
++ default:report_fatal_error("Nosuz16: unsupported operation or generic pointer access",false);
++ }
++}
++SDValue N16Lowering::LowerFormalArguments(SDValue Chain,CallingConv::ID CC,bool VarArg,const SmallVectorImpl<ISD::InputArg> &Ins,const SDLoc &L,SelectionDAG &D,SmallVectorImpl<SDValue> &Vals) const {
++ if(VarArg || CC!=CallingConv::C)report_fatal_error("Nosuz16: only fixed-argument C calling convention is supported",false);
++ auto &MF=D.getMachineFunction();unsigned Regs[]={Nosuz16::R1,Nosuz16::R2,Nosuz16::R3};
++ for(unsigned I=0;I<Ins.size();++I) {
++  if(Ins[I].VT!=MVT::i16)report_fatal_error("Nosuz16: argument must be i16",false);
++  if(I<3) {Register V=MF.getRegInfo().createVirtualRegister(&Nosuz16::GPRRegClass);MF.getRegInfo().addLiveIn(Regs[I],V);Vals.push_back(D.getCopyFromReg(Chain,L,V,MVT::i16));}
++  else {int FI=MF.getFrameInfo().CreateFixedObject(2,(I-3)*2,true);SDValue V=D.getLoad(MVT::i16,L,Chain,D.getFrameIndex(FI,MVT::i16),MachinePointerInfo::getFixedStack(MF,FI));Vals.push_back(V);Chain=V.getValue(1);}
++ }
++ return Chain;
++}
++SDValue N16Lowering::LowerReturn(SDValue Chain,CallingConv::ID,bool,const SmallVectorImpl<ISD::OutputArg> &Outs,const SmallVectorImpl<SDValue> &Vals,const SDLoc &L,SelectionDAG &D) const {
++ if(Outs.size()>1)report_fatal_error("Nosuz16: return type must be void or i16",false);
++ SDValue Glue;SmallVector<SDValue,4> Ops;
++ if(!Outs.empty()) {Chain=D.getCopyToReg(Chain,L,Nosuz16::R1,Vals[0],SDValue());Glue=Chain.getValue(1);}
++ Ops.push_back(Chain);if(!Outs.empty())Ops.push_back(D.getRegister(Nosuz16::R1,MVT::i16));if(Glue)Ops.push_back(Glue);
++ return D.getNode(N16ISD::RET,L,MVT::Other,Ops);
++}
++SDValue N16Lowering::LowerCall(CallLoweringInfo &CLI,SmallVectorImpl<SDValue> &Vals) const {
++ auto &D=CLI.DAG;auto L=CLI.DL;SDValue Chain=CLI.Chain,Callee=CLI.Callee;
++ CLI.IsTailCall=false;
++ if(CLI.IsVarArg || CLI.CallConv!=CallingConv::C)report_fatal_error("Nosuz16: unsupported call convention",false);
++ unsigned Bytes=CLI.Outs.size()>3?(CLI.Outs.size()-3)*2:0;
++ if(Bytes>32766)report_fatal_error("Nosuz16: outgoing argument area exceeds supported byte-offset range",false);
++ Chain=D.getCALLSEQ_START(Chain,Bytes,0,L);
++ for(unsigned I=3;I<CLI.OutVals.size();++I) {
++  SDValue SP=D.getCopyFromReg(Chain,L,Nosuz16::R6,MVT::i16);
++  SDValue P=D.getNode(ISD::ADD,L,MVT::i16,SP,D.getConstant((I-3)*2,L,MVT::i16));
++  Chain=D.getStore(Chain,L,CLI.OutVals[I],P,MachinePointerInfo());
++ }
++ SDValue Glue;unsigned Regs[]={Nosuz16::R1,Nosuz16::R2,Nosuz16::R3};
++ for(unsigned I=0;I<std::min<size_t>(3,CLI.OutVals.size());++I) {Chain=D.getCopyToReg(Chain,L,Regs[I],CLI.OutVals[I],Glue);Glue=Chain.getValue(1);}
++ if(auto *G=dyn_cast<GlobalAddressSDNode>(Callee))Callee=D.getTargetGlobalAddress(G->getGlobal(),L,MVT::i16);
++ else if(auto *E=dyn_cast<ExternalSymbolSDNode>(Callee))Callee=D.getTargetExternalSymbol(E->getSymbol(),MVT::i16);
++ else report_fatal_error("Nosuz16: indirect calls are not yet supported",false);
++ SmallVector<SDValue,8> Ops={Chain,Callee};
++ Ops.push_back(D.getRegisterMask(D.getSubtarget().getRegisterInfo()->getCallPreservedMask(D.getMachineFunction(),CLI.CallConv)));
++ for(unsigned I=0;I<std::min<size_t>(3,CLI.OutVals.size());++I)Ops.push_back(D.getRegister(Regs[I],MVT::i16));
++ if(Glue)Ops.push_back(Glue);
++ Chain=D.getNode(N16ISD::CALL,L,D.getVTList(MVT::Other,MVT::Glue),Ops);Glue=Chain.getValue(1);
++ Chain=D.getCALLSEQ_END(Chain,Bytes,0,Glue,L);Glue=Chain.getValue(1);
++ if(CLI.Ins.size()>1)report_fatal_error("Nosuz16: unsupported multiword return",false);
++ if(!CLI.Ins.empty()) {SDValue R=D.getCopyFromReg(Chain,L,Nosuz16::R1,MVT::i16,Glue);Vals.push_back(R);Chain=R.getValue(1);}
++ return Chain;
++}
++MachineBasicBlock *N16Lowering::EmitInstrWithCustomInserter(MachineInstr &MI,MachineBasicBlock *B) const {
++ auto &MF=*B->getParent();auto &MRI=MF.getRegInfo();const auto &II=*MF.getSubtarget().getInstrInfo();DebugLoc L=MI.getDebugLoc();
++ auto newReg=[&](){return MRI.createVirtualRegister(&Nosuz16::GPRRegClass);};
++ auto make=[&](){auto *N=MF.CreateMachineBasicBlock(B->getBasicBlock());MF.insert(std::next(B->getIterator()),N);return N;};
++ if(MI.getOpcode()==Nosuz16::SELECT) {
++  auto *Done=make();auto *False=make();Done->splice(Done->begin(),B,std::next(MI.getIterator()),B->end());Done->transferSuccessorsAndUpdatePHIs(B);
++  B->addSuccessor(Done);B->addSuccessor(False);False->addSuccessor(Done);
++  BuildMI(*B,B->end(),L,II.get(Nosuz16::BRCC)).addReg(MI.getOperand(1).getReg()).addReg(MI.getOperand(2).getReg()).addImm(MI.getOperand(3).getImm()).addMBB(Done);
++  BuildMI(*Done,Done->begin(),L,II.get(TargetOpcode::PHI),MI.getOperand(0).getReg()).addReg(MI.getOperand(4).getReg()).addMBB(B).addReg(MI.getOperand(5).getReg()).addMBB(False);
++  MI.eraseFromParent();return Done;
++ }
++ unsigned Shift=MI.getOpcode()==Nosuz16::VSHL?Nosuz16::SLL:MI.getOpcode()==Nosuz16::VSRL?Nosuz16::SRL:Nosuz16::ASR;
++ auto *Done=make();auto *Body=make();auto *Test=make();Done->splice(Done->begin(),B,std::next(MI.getIterator()),B->end());Done->transferSuccessorsAndUpdatePHIs(B);
++ Register V=newReg(),Count=newReg(),NextV=newReg(),NextC=newReg();
++ B->addSuccessor(Test);Test->addSuccessor(Done);Test->addSuccessor(Body);Body->addSuccessor(Test);
++ BuildMI(*Test,Test->end(),L,II.get(TargetOpcode::PHI),V).addReg(MI.getOperand(1).getReg()).addMBB(B).addReg(NextV).addMBB(Body);
++ BuildMI(*Test,Test->end(),L,II.get(TargetOpcode::PHI),Count).addReg(MI.getOperand(2).getReg()).addMBB(B).addReg(NextC).addMBB(Body);
++ BuildMI(*Test,Test->end(),L,II.get(Nosuz16::BRCC)).addReg(Count).addReg(Nosuz16::R0).addImm(ISD::SETEQ).addMBB(Done);
++ BuildMI(*Body,Body->end(),L,II.get(Shift),NextV).addReg(V);
++ BuildMI(*Body,Body->end(),L,II.get(Nosuz16::ADDI),NextC).addReg(Count).addImm(-1);
++ BuildMI(*Body,Body->end(),L,II.get(Nosuz16::JMP)).addMBB(Test);
++ BuildMI(*Done,Done->begin(),L,II.get(TargetOpcode::COPY),MI.getOperand(0).getReg()).addReg(V);
++ MI.eraseFromParent();return Done;
++}
++namespace {
++class N16Selector : public SelectionDAGISel {
++public:
++ N16Selector(N16TargetMachine &TM,CodeGenOptLevel OL):SelectionDAGISel(TM,OL) {}
++ void Select(SDNode *N) override {
++  if(N->isMachineOpcode()){N->setNodeId(-1);return;}
++  SDLoc L(N);auto C=[&](int64_t V){return CurDAG->getTargetConstant(V,L,MVT::i16);};
++  unsigned Opc=0;SmallVector<SDValue,8> Ops;SDVTList VTs=N->getVTList();
++  switch(N->getOpcode()) {
++  case ISD::CALLSEQ_START:Opc=Nosuz16::ADJCALLSTACKDOWN;Ops={C(cast<ConstantSDNode>(N->getOperand(1))->getZExtValue()),C(0),N->getOperand(0)};break;
++  case ISD::CALLSEQ_END:Opc=Nosuz16::ADJCALLSTACKUP;Ops={N->getOperand(1),N->getOperand(2),N->getOperand(0)};if(N->getNumOperands()>3)Ops.push_back(N->getOperand(3));break;
++  case ISD::Constant:Opc=Nosuz16::LI;Ops={C(N->getAsZExtVal())};break;
++  case ISD::ADD:Opc=Nosuz16::ADD;break;case ISD::SUB:Opc=Nosuz16::SUB;break;
++  case ISD::AND:Opc=Nosuz16::AND;break;case ISD::OR:Opc=Nosuz16::OR;break;case ISD::XOR:Opc=Nosuz16::XOR;break;
++  case N16ISD::SHL1:Opc=Nosuz16::SLL;break;case N16ISD::SRL1:Opc=Nosuz16::SRL;break;case N16ISD::SRA1:Opc=Nosuz16::ASR;break;
++  case N16ISD::SHL:Opc=Nosuz16::VSHL;break;case N16ISD::SRL:Opc=Nosuz16::VSRL;break;case N16ISD::SRA:Opc=Nosuz16::VSRA;break;
++  case N16ISD::SELECT:Opc=Nosuz16::SELECT;break;
++  case ISD::BR:Opc=Nosuz16::JMP;Ops={N->getOperand(1),N->getOperand(0)};break;
++  case N16ISD::BRCC:Opc=Nosuz16::BRCC;Ops={N->getOperand(1),N->getOperand(2),N->getOperand(3),N->getOperand(4),N->getOperand(0)};break;
++  case N16ISD::RET:Opc=Nosuz16::RET;Ops.append(N->op_begin()+1,N->op_end()); { SDValue G; if(!Ops.empty() && Ops.back().getValueType()==MVT::Glue) {G=Ops.pop_back_val();} Ops.push_back(N->getOperand(0)); if(G)Ops.push_back(G); } break;
++  case N16ISD::CALL:Opc=Nosuz16::CALL;Ops.append(N->op_begin()+1,N->op_end()); { SDValue G; if(!Ops.empty() && Ops.back().getValueType()==MVT::Glue) {G=Ops.pop_back_val();} Ops.push_back(N->getOperand(0)); if(G)Ops.push_back(G); } break;
++  case N16ISD::LDW:Opc=Nosuz16::LD;Ops={N->getOperand(0),C(0),N->getOperand(1)};break;
++  case N16ISD::STW:Opc=Nosuz16::ST;Ops={N->getOperand(0),N->getOperand(1),C(0),N->getOperand(2)};break;
++  case ISD::LOAD:case ISD::STORE: {
++   bool Load=N->getOpcode()==ISD::LOAD;auto *Mem=cast<MemSDNode>(N);
++   if(Mem->getMemoryVT()!=MVT::i16)report_fatal_error("Nosuz16: only word stack slots are supported",false);
++   SDValue Addr=Load?cast<LoadSDNode>(N)->getBasePtr():cast<StoreSDNode>(N)->getBasePtr();int64_t Offset=0;
++   if(Addr.getOpcode()==ISD::ADD && isa<ConstantSDNode>(Addr.getOperand(1))) {Offset=cast<ConstantSDNode>(Addr.getOperand(1))->getSExtValue();Addr=Addr.getOperand(0);}
++   if(Offset%2)report_fatal_error("Nosuz16: unaligned stack access",false);
++   if(Addr.getOpcode()==ISD::FrameIndex)Addr=CurDAG->getTargetFrameIndex(cast<FrameIndexSDNode>(Addr)->getIndex(),MVT::i16);
++   else {
++    if(Addr.getOpcode()!=ISD::CopyFromReg||cast<RegisterSDNode>(Addr.getOperand(1))->getReg()!=Nosuz16::R6)report_fatal_error("Nosuz16: generic pointer access unsupported; use word intrinsics",false);
++    Addr=CurDAG->getRegister(Nosuz16::R6,MVT::i16);
++   }
++   Opc=Load?Nosuz16::LD:Nosuz16::ST;
++   if(Addr.getOpcode()==ISD::Register&&!isInt<6>(Offset/2))Opc=Load?Nosuz16::LDSP:Nosuz16::STSP;
++   if(!Load)Ops.push_back(cast<StoreSDNode>(N)->getValue());Ops.push_back(Addr);Ops.push_back(C(Offset/2));Ops.push_back(N->getOperand(0));break;
++  }
++  default:{static const uint8_t Empty[]={OPC_Scope,0};SelectCodeCommon(N,Empty,sizeof(Empty),nullptr);return;}
++  }
++  if(Ops.empty())Ops.append(N->op_begin(),N->op_end());
++  CurDAG->SelectNodeTo(N,Opc,VTs,Ops);
++ }
++};
++class N16SelectorLegacy : public SelectionDAGISelLegacy {
++public:static char ID;N16SelectorLegacy(N16TargetMachine &TM,CodeGenOptLevel OL):SelectionDAGISelLegacy(ID,std::make_unique<N16Selector>(TM,OL)) {}
++};char N16SelectorLegacy::ID;
++class N16Validate : public FunctionPass {
++public:static char ID;N16Validate():FunctionPass(ID) {}
++ bool runOnFunction(Function &F) override {
++  if(F.isDeclaration())return false;
++  if(F.isVarArg())report_fatal_error("Nosuz16: variadic functions unsupported",false);
++  if(!F.getReturnType()->isVoidTy() && !F.getReturnType()->isIntegerTy(16))report_fatal_error("Nosuz16: return must be void or i16",false);
++  for(auto &A:F.args())if(!A.getType()->isIntegerTy(16))report_fatal_error("Nosuz16: arguments must be i16",false);
++  for(auto &I:instructions(F)) {
++   if(!I.getType()->isVoidTy() && !(I.getType()->isIntegerTy() && I.getType()->getIntegerBitWidth()<=16))report_fatal_error("Nosuz16: unsupported value type",false);
++   for(auto &O:I.operands()) {
++    auto *T=O->getType();
++    if(T->isFloatingPointTy()||T->isVectorTy()||T->isAggregateType()||(T->isIntegerTy()&&T->getIntegerBitWidth()>16))report_fatal_error("Nosuz16: unsupported operand type",false);
++   }
++   if(isa<LoadInst>(I)||isa<StoreInst>(I)||isa<GetElementPtrInst>(I)||isa<AllocaInst>(I)||isa<PtrToIntInst>(I)||isa<IntToPtrInst>(I))report_fatal_error("Nosuz16: generic memory operations unsupported; use llvm.nosuz16.ldw/stw",false);
++   if(isa<InvokeInst>(I)||isa<CallBrInst>(I))report_fatal_error("Nosuz16: exceptional calls unsupported",false);
++   if(auto *Call=dyn_cast<CallInst>(&I))if(Call->isMustTailCall())report_fatal_error("Nosuz16: musttail calls unsupported",false);
++   if(auto *C=dyn_cast<CallBase>(&I)) {
++    if(C->isInlineAsm())report_fatal_error("Nosuz16: inline assembly in IR unsupported",false);
++    if(!C->getCalledFunction())report_fatal_error("Nosuz16: indirect calls unsupported",false);
++    for(auto &A:C->args())if(!A->getType()->isIntegerTy(16))report_fatal_error("Nosuz16: call arguments must be i16",false);
++   }
++  }
++  return false;
++ }
++};char N16Validate::ID;
++class N16PassConfig : public TargetPassConfig {
++public:N16PassConfig(N16TargetMachine &TM,PassManagerBase &PM):TargetPassConfig(TM,PM) {}
++ void addIRPasses() override {addPass(new N16Validate());TargetPassConfig::addIRPasses();}
++ bool addInstSelector() override {addPass(new N16SelectorLegacy(getTM<N16TargetMachine>(),getOptLevel()));return false;}
++};
++}
++INITIALIZE_PASS(N16SelectorLegacy,"nosuz16-isel","Nosuz16 DAG instruction selection",false,false)
++INITIALIZE_PASS(N16Validate,"nosuz16-validate","Nosuz16 IR validation",false,false)
++TargetPassConfig *N16TargetMachine::createPassConfig(PassManagerBase &P){return new N16PassConfig(*this,P);}
++extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeNosuz16Target() {
++ initializeN16SelectorLegacyPass(*PassRegistry::getPassRegistry());
++ initializeN16ValidatePass(*PassRegistry::getPassRegistry());
++ RegisterTargetMachine<N16TargetMachine> TM(getTheNosuz16Target());
++}
+diff --git a/llvm/lib/Target/Nosuz16/Nosuz16.h b/llvm/lib/Target/Nosuz16/Nosuz16.h
+new file mode 100644
+index 000000000..bba8c78f5
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/Nosuz16.h
+@@ -0,0 +1,94 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++#pragma once
++#include "MCTargetDesc/Nosuz16MC.h"
++#include "llvm/CodeGen/CodeGenTargetMachineImpl.h"
++#include "llvm/CodeGen/TargetFrameLowering.h"
++#include "llvm/CodeGen/TargetInstrInfo.h"
++#include "llvm/CodeGen/TargetRegisterInfo.h"
++#include "llvm/CodeGen/TargetLowering.h"
++#include "llvm/CodeGen/TargetSubtargetInfo.h"
++#include "llvm/CodeGen/SelectionDAGTargetInfo.h"
++#define GET_REGINFO_HEADER
++#include "Nosuz16GenRegisterInfo.inc"
++#define GET_INSTRINFO_HEADER
++#include "Nosuz16GenInstrInfo.inc"
++#define GET_SUBTARGETINFO_HEADER
++#include "Nosuz16GenSubtargetInfo.inc"
++namespace llvm {
++class PassRegistry;
++void initializeN16SelectorLegacyPass(PassRegistry &);
++void initializeN16ValidatePass(PassRegistry &);
++namespace N16ISD { enum { RET=ISD::BUILTIN_OP_END, CALL, BRCC, SELECT, SHL, SRL, SRA, SHL1, SRL1, SRA1, LDW, STW }; }
++class N16RegisterInfo final : public Nosuz16GenRegisterInfo {
++public:
++ N16RegisterInfo();
++ const MCPhysReg *getCalleeSavedRegs(const MachineFunction *) const override;
++ const uint32_t *getCallPreservedMask(const MachineFunction &, CallingConv::ID) const override;
++ BitVector getReservedRegs(const MachineFunction &) const override;
++ bool eliminateFrameIndex(MachineBasicBlock::iterator, int, unsigned, RegScavenger *) const override;
++ Register getFrameRegister(const MachineFunction &) const override { return Nosuz16::R6; }
++};
++class N16InstrInfo final : public Nosuz16GenInstrInfo {
++ N16RegisterInfo RI;
++public:
++ explicit N16InstrInfo(const TargetSubtargetInfo &);
++ const N16RegisterInfo &getRegisterInfo() const { return RI; }
++ void copyPhysReg(MachineBasicBlock &,MachineBasicBlock::iterator,const DebugLoc &,Register,Register,bool,bool=false,bool=false) const override;
++ void storeRegToStackSlot(MachineBasicBlock &,MachineBasicBlock::iterator,Register,bool,int,const TargetRegisterClass *,Register,MachineInstr::MIFlag=MachineInstr::NoFlags) const override;
++ void loadRegFromStackSlot(MachineBasicBlock &,MachineBasicBlock::iterator,Register,int,const TargetRegisterClass *,Register,unsigned=0,MachineInstr::MIFlag=MachineInstr::NoFlags) const override;
++ bool expandPostRAPseudo(MachineInstr &) const override;
++ bool analyzeBranch(MachineBasicBlock &,MachineBasicBlock *&,MachineBasicBlock *&,SmallVectorImpl<MachineOperand> &,bool=false) const override;
++ unsigned insertBranch(MachineBasicBlock &,MachineBasicBlock *,MachineBasicBlock *,ArrayRef<MachineOperand>,const DebugLoc &,int * =nullptr) const override;
++ unsigned removeBranch(MachineBasicBlock &,int * =nullptr) const override;
++ bool reverseBranchCondition(SmallVectorImpl<MachineOperand> &) const override;
++ unsigned getInstSizeInBytes(const MachineInstr &) const override;
++ bool isBranchOffsetInRange(unsigned, int64_t) const override;
++ MachineBasicBlock *getBranchDestBlock(const MachineInstr &) const override;
++};
++class Nosuz16FrameLowering final : public TargetFrameLowering {
++public:
++ Nosuz16FrameLowering():TargetFrameLowering(StackGrowsDown,Align(2),0,Align(2)) {}
++ bool hasReservedCallFrame(const MachineFunction &) const override { return true; }
++ bool hasFPImpl(const MachineFunction &) const override { return false; }
++ void emitPrologue(MachineFunction &,MachineBasicBlock &) const override;
++ void emitEpilogue(MachineFunction &,MachineBasicBlock &) const override;
++ MachineBasicBlock::iterator eliminateCallFramePseudoInstr(MachineFunction &,MachineBasicBlock &,MachineBasicBlock::iterator) const override;
++};
++class Nosuz16Subtarget;
++class N16Lowering final : public TargetLowering {
++public:
++ N16Lowering(const TargetMachine &,const Nosuz16Subtarget &);
++ EVT getSetCCResultType(const DataLayout &,LLVMContext &,EVT) const override { return MVT::i16; }
++ MVT getScalarShiftAmountTy(const DataLayout &,EVT) const override { return MVT::i16; }
++ const char *getTargetNodeName(unsigned) const override;
++ SDValue LowerOperation(SDValue,SelectionDAG &) const override;
++ SDValue LowerFormalArguments(SDValue,CallingConv::ID,bool,const SmallVectorImpl<ISD::InputArg> &,const SDLoc &,SelectionDAG &,SmallVectorImpl<SDValue> &) const override;
++ SDValue LowerReturn(SDValue,CallingConv::ID,bool,const SmallVectorImpl<ISD::OutputArg> &,const SmallVectorImpl<SDValue> &,const SDLoc &,SelectionDAG &) const override;
++ SDValue LowerCall(CallLoweringInfo &,SmallVectorImpl<SDValue> &) const override;
++ MachineBasicBlock *EmitInstrWithCustomInserter(MachineInstr &,MachineBasicBlock *) const override;
++};
++class Nosuz16Subtarget final : public Nosuz16GenSubtargetInfo {
++ N16InstrInfo II;
++ Nosuz16FrameLowering FL;
++ N16Lowering TL;
++ SelectionDAGTargetInfo TS;
++public:
++ Nosuz16Subtarget(const Triple &,StringRef,StringRef,const TargetMachine &);
++ void ParseSubtargetFeatures(StringRef,StringRef,StringRef);
++ const N16InstrInfo *getInstrInfo() const override { return &II; }
++ const N16RegisterInfo *getRegisterInfo() const override { return &II.getRegisterInfo(); }
++ const Nosuz16FrameLowering *getFrameLowering() const override { return &FL; }
++ const N16Lowering *getTargetLowering() const override { return &TL; }
++ const SelectionDAGTargetInfo *getSelectionDAGInfo() const override { return &TS; }
++};
++class N16TargetMachine final : public CodeGenTargetMachineImpl {
++ std::unique_ptr<TargetLoweringObjectFile> OF;
++ Nosuz16Subtarget ST;
++public:
++ N16TargetMachine(const Target &,const Triple &,StringRef,StringRef,const TargetOptions &,std::optional<Reloc::Model>,std::optional<CodeModel::Model>,CodeGenOptLevel,bool);
++ ~N16TargetMachine() override;
++ const Nosuz16Subtarget *getSubtargetImpl(const Function &) const override { return &ST; }
++ TargetLoweringObjectFile *getObjFileLowering() const override { return OF.get(); }
++ TargetPassConfig *createPassConfig(PassManagerBase &) override;
++};
++}
+diff --git a/llvm/lib/Target/Nosuz16/Nosuz16.td b/llvm/lib/Target/Nosuz16/Nosuz16.td
+new file mode 100644
+index 000000000..8f62374ab
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/Nosuz16.td
+@@ -0,0 +1,78 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++include "llvm/Target/Target.td"
++class NReg<bits<3> num, string name> : Register<name> {
++ let Namespace = "Nosuz16"; let HWEncoding = 0; let HWEncoding{2-0} = num;
++}
++def R0 : NReg<0, "r0">;
++def R1 : NReg<1, "r1">;
++def R2 : NReg<2, "r2">;
++def R3 : NReg<3, "r3">;
++def R4 : NReg<4, "r4">;
++def R5 : NReg<5, "r5">;
++def R6 : NReg<6, "r6">;
++def R7 : NReg<7, "r7">;
++
++def STATUS : Register<"status"> { let Namespace = "Nosuz16"; }
++def GPR : RegisterClass<"Nosuz16", [i16], 16, (add R1,R2,R3,R4,R5,R6,R7,R0)>;
++def CSR_Function : CalleeSavedRegs<(add R4,R5,R7)>;
++def CSR_ABI : CalleeSavedRegs<(add R4,R5,R6)>;
++def nimm : Operand<i16>;
++def target : Operand<OtherVT>;
++class Inst<dag outs, dag ins, string asm, int size=2> : Instruction {
++ let Namespace="Nosuz16"; let OutOperandList=outs; let InOperandList=ins;
++ let AsmString=asm; let Size=size; let hasSideEffects=0;
++}
++class Binary<string name> : Inst<(outs GPR:$rd), (ins GPR:$a,GPR:$rs), name # " $rd, $rs"> {
++ let Constraints="$rd = $a"; let Defs=[STATUS];
++}
++def ADD : Binary<"add">;
++def SUB : Binary<"sub">;
++let Uses=[STATUS] in def ADDC : Binary<"addc">;
++let Uses=[STATUS] in def SUBC : Binary<"subc">;
++def AND : Binary<"and">;
++def OR : Binary<"or">;
++def XOR : Binary<"xor">;
++
++class Shift<string name> : Inst<(outs GPR:$rd), (ins GPR:$a), name # " $rd"> {
++ let Constraints="$rd = $a"; let Defs=[STATUS];
++}
++def SLL : Shift<"sll">; def SRL : Shift<"srl">; def ASR : Shift<"asr">;
++def ADDI : Inst<(outs GPR:$rd),(ins GPR:$a,nimm:$imm),"addi $rd, $imm"> {
++ let Constraints="$rd = $a"; let Defs=[STATUS];
++}
++def LD : Inst<(outs GPR:$rd),(ins GPR:$base,nimm:$offset),"ld $rd, [$base+$offset]"> { let mayLoad=1; }
++def ST : Inst<(outs),(ins GPR:$rs,GPR:$base,nimm:$offset),"st $rs, [$base+$offset]"> { let mayStore=1; }
++let isPseudo=1, Defs=[R6,STATUS], Uses=[R6] in {
++ def LDSP : Inst<(outs GPR:$rd),(ins GPR:$base,nimm:$offset),""> { let mayLoad=1; }
++ def STSP : Inst<(outs),(ins GPR:$rs,GPR:$base,nimm:$offset),""> { let mayStore=1; }
++}
++class Branch<string n> : Inst<(outs),(ins GPR:$a,GPR:$b,target:$dst),n # " $a, $b, $dst"> {
++ let isBranch=1; let isTerminator=1;
++}
++def BEQ : Branch<"beq">; def BNE : Branch<"bne">; def BLT : Branch<"blt">;
++def JAL : Inst<(outs GPR:$rd),(ins target:$dst),"jal $rd, $dst">;
++def JALR : Inst<(outs GPR:$rd),(ins GPR:$base,nimm:$offset),"jalr $rd, $base, $offset">;
++def HALT : Inst<(outs),(ins),"halt"> { let hasSideEffects=1; let isTerminator=1; let isBarrier=1; }
++def MOV : Inst<(outs GPR:$rd),(ins GPR:$rs),"mov $rd, $rs",4> { let isPseudo=1; let Defs=[STATUS]; }
++def LI : Inst<(outs GPR:$rd),(ins nimm:$value),"li $rd, $value",66> { let isPseudo=1; let Defs=[STATUS]; }
++def RET : Inst<(outs),(ins variable_ops),"ret"> { let isPseudo=1; let Uses=[R7]; let isReturn=1; let isTerminator=1; let isBarrier=1; }
++def JMP : Inst<(outs),(ins target:$dst),"ljmp $dst",68> {
++ let isPseudo=1; let isBranch=1; let isTerminator=1; let isBarrier=1; let Defs=[R5,STATUS];
++}
++def BRCC : Inst<(outs),(ins GPR:$a,GPR:$b,nimm:$cc,target:$dst),"brcc $a, $b, $cc, $dst",74> {
++ let isPseudo=1; let isBranch=1; let isTerminator=1; let Defs=[R5,STATUS];
++}
++def CALL : Inst<(outs),(ins target:$dst, variable_ops),"lcall $dst",68> {
++ let isPseudo=1; let isCall=1; let Defs=[R7,STATUS]; let Uses=[R6]; let hasSideEffects=1;
++}
++def SELECT : Inst<(outs GPR:$rd),(ins GPR:$a,GPR:$b,nimm:$cc,GPR:$t,GPR:$f),""> {
++ let isPseudo=1; let usesCustomInserter=1;
++}
++class VShift : Inst<(outs GPR:$rd),(ins GPR:$a,GPR:$count),""> { let isPseudo=1; let usesCustomInserter=1; }
++def VSHL : VShift; def VSRL : VShift; def VSRA : VShift;
++def ADJCALLSTACKDOWN : Inst<(outs),(ins nimm:$amt,nimm:$align),""> { let isPseudo=1; let Defs=[R6,STATUS]; let Uses=[R6]; }
++def ADJCALLSTACKUP : Inst<(outs),(ins nimm:$amt,nimm:$pop),""> { let isPseudo=1; let Defs=[R6,STATUS]; let Uses=[R6]; }
++def : Processor<"generic", NoItineraries, []>;
++defm : RemapAllTargetPseudoPointerOperands<GPR>;
++def Nosuz16InstrInfo : InstrInfo;
++def Nosuz16 : Target { let InstructionSet=Nosuz16InstrInfo; }
+diff --git a/llvm/lib/Target/Nosuz16/Nosuz16AsmPrinter.cpp b/llvm/lib/Target/Nosuz16/Nosuz16AsmPrinter.cpp
+new file mode 100644
+index 000000000..1c416854b
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/Nosuz16AsmPrinter.cpp
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++#include "Nosuz16.h"
++#include "TargetInfo/Nosuz16TargetInfo.h"
++#include "llvm/CodeGen/AsmPrinter.h"
++#include "llvm/MC/MCInst.h"
++#include "llvm/MC/MCExpr.h"
++#include "llvm/MC/MCStreamer.h"
++#include "llvm/MC/TargetRegistry.h"
++using namespace llvm;
++namespace {
++class N16AsmPrinter : public AsmPrinter {
++public:N16AsmPrinter(TargetMachine &TM,std::unique_ptr<MCStreamer> S):AsmPrinter(TM,std::move(S)) {}
++ StringRef getPassName() const override{return "Nosuz16 assembly printer";}
++ void emitInstruction(const MachineInstr *MI) override {
++  MCInst I;I.setOpcode(MI->getOpcode());
++  for(const auto &O:MI->operands()) {
++   if(O.isReg() && !O.isImplicit()) I.addOperand(MCOperand::createReg(O.getReg()));
++   else if(O.isImm())I.addOperand(MCOperand::createImm(O.getImm()));
++   else if(O.isMBB())I.addOperand(MCOperand::createExpr(MCSymbolRefExpr::create(O.getMBB()->getSymbol(),OutContext)));
++   else if(O.isGlobal())I.addOperand(MCOperand::createExpr(MCSymbolRefExpr::create(getSymbol(O.getGlobal()),OutContext)));
++   else if(O.isSymbol())I.addOperand(MCOperand::createExpr(MCSymbolRefExpr::create(GetExternalSymbolSymbol(O.getSymbolName()),OutContext)));
++  }
++  // MC form omits the tied old-destination operand.
++  unsigned Op=I.getOpcode();
++  if(Op==Nosuz16::ADD||Op==Nosuz16::SUB||Op==Nosuz16::ADDC||Op==Nosuz16::SUBC||Op==Nosuz16::AND||Op==Nosuz16::OR||Op==Nosuz16::XOR||Op==Nosuz16::ADDI||Op==Nosuz16::SLL||Op==Nosuz16::SRL||Op==Nosuz16::ASR)I.erase(I.begin()+1);
++  if(Op==Nosuz16::CALL)while(I.getNumOperands()>1)I.erase(I.end()-1);
++  if(Op==Nosuz16::RET)while(I.getNumOperands())I.erase(I.end()-1);
++  EmitToStreamer(*OutStreamer,I);
++ }
++};
++
++}
++extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeNosuz16AsmPrinter() {
++ RegisterAsmPrinter<N16AsmPrinter> AP(getTheNosuz16Target());
++}
+diff --git a/llvm/lib/Target/Nosuz16/TargetInfo/CMakeLists.txt b/llvm/lib/Target/Nosuz16/TargetInfo/CMakeLists.txt
+new file mode 100644
+index 000000000..75e03de20
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/TargetInfo/CMakeLists.txt
+@@ -0,0 +1,2 @@
++add_llvm_component_library(LLVMNosuz16Info Nosuz16TargetInfo.cpp
++ LINK_COMPONENTS MC Support ADD_TO_COMPONENT Nosuz16)
+diff --git a/llvm/lib/Target/Nosuz16/TargetInfo/Nosuz16TargetInfo.cpp b/llvm/lib/Target/Nosuz16/TargetInfo/Nosuz16TargetInfo.cpp
+new file mode 100644
+index 000000000..d8bd511ec
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/TargetInfo/Nosuz16TargetInfo.cpp
+@@ -0,0 +1,9 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++#include "Nosuz16TargetInfo.h"
++#include "llvm/MC/TargetRegistry.h"
++#include "llvm/Support/Compiler.h"
++using namespace llvm;
++Target &llvm::getTheNosuz16Target() { static Target T; return T; }
++extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeNosuz16TargetInfo() {
++ RegisterTarget<Triple::nosuz16> X(getTheNosuz16Target(), "nosuz16", "Nosuz16 v2.4", "Nosuz16");
++}
+diff --git a/llvm/lib/Target/Nosuz16/TargetInfo/Nosuz16TargetInfo.h b/llvm/lib/Target/Nosuz16/TargetInfo/Nosuz16TargetInfo.h
+new file mode 100644
+index 000000000..d8a3ab9d9
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/TargetInfo/Nosuz16TargetInfo.h
+@@ -0,0 +1,3 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++#pragma once
++namespace llvm { class Target; Target &getTheNosuz16Target(); }
+diff --git a/llvm/lib/TargetParser/TargetDataLayout.cpp b/llvm/lib/TargetParser/TargetDataLayout.cpp
+index 83bc4a624..e968df4b7 100644
+--- a/llvm/lib/TargetParser/TargetDataLayout.cpp
++++ b/llvm/lib/TargetParser/TargetDataLayout.cpp
+@@ -627,6 +627,8 @@ std::string Triple::computeDataLayout(StringRef ABIName) const {
+   case Triple::mips64:
+   case Triple::mips64el:
+     return computeMipsDataLayout(*this, ABIName);
++  case Triple::nosuz16:
++    return "e-m:e-p:16:16-i16:16-i32:16-i64:16-n16-S16";
+   case Triple::msp430:
+     return "e-m:e-p:16:16-i32:16-i64:16-f32:16-f64:16-a:8-n8:16-S16";
+   case Triple::ppc:
+diff --git a/llvm/lib/TargetParser/Triple.cpp b/llvm/lib/TargetParser/Triple.cpp
+index ef4802817..428620173 100644
+--- a/llvm/lib/TargetParser/Triple.cpp
++++ b/llvm/lib/TargetParser/Triple.cpp
+@@ -91,6 +91,8 @@ StringRef Triple::getArchTypeName(ArchType Kind) {
+     return "mips";
+   case mipsel:
+     return "mipsel";
++  case nosuz16:
++    return "nosuz16";
+   case msp430:
+     return "msp430";
+   case nvptx64:
+@@ -473,6 +475,7 @@ Triple::ArchType Triple::getArchTypeForLLVMName(StringRef Name) {
+       .Case("mips64", mips64)
+       .Case("mips64el", mips64el)
+       .Case("msp430", msp430)
++      .Case("nosuz16", nosuz16)
+       .Case("ppc64", ppc64)
+       .Case("ppc32", ppc)
+       .Case("ppc", ppc)
+@@ -623,6 +626,7 @@ Triple::ArchType Triple::parseArch(StringRef ArchName) {
+           .Case("avr", Triple::avr)
+           .Case("m68k", Triple::m68k)
+           .Case("msp430", Triple::msp430)
++          .Case("nosuz16", Triple::nosuz16)
+           .Cases({"mips", "mipseb", "mipsallegrex", "mipsisa32r6", "mipsr6"},
+                  Triple::mips)
+           .Cases({"mipsel", "mipsallegrexel", "mipsisa32r6el", "mipsr6el"},
+@@ -983,6 +987,7 @@ static Triple::ObjectFormatType getDefaultFormat(const Triple &T) {
+   case Triple::mips64:
+   case Triple::mips64el:
+   case Triple::mips:
++  case Triple::nosuz16:
+   case Triple::msp430:
+   case Triple::nvptx64:
+   case Triple::nvptx:
+@@ -1736,6 +1741,7 @@ unsigned Triple::getArchPointerBitWidth(llvm::Triple::ArchType Arch) {
+     return 0;
+ 
+   case llvm::Triple::avr:
++  case llvm::Triple::nosuz16:
+   case llvm::Triple::msp430:
+     return 16;
+ 
+@@ -1844,6 +1850,7 @@ Triple Triple::get32BitArchVariant() const {
+   case Triple::avr:
+   case Triple::bpfeb:
+   case Triple::bpfel:
++  case Triple::nosuz16:
+   case Triple::msp430:
+   case Triple::systemz:
+   case Triple::ve:
+@@ -1962,6 +1969,7 @@ Triple Triple::get64BitArchVariant() const {
+   case Triple::kalimba:
+   case Triple::lanai:
+   case Triple::m68k:
++  case Triple::nosuz16:
+   case Triple::msp430:
+   case Triple::r600:
+   case Triple::shave:
+@@ -2088,6 +2096,7 @@ Triple Triple::getBigEndianArchVariant() const {
+   case Triple::kalimba:
+   case Triple::loongarch32:
+   case Triple::loongarch64:
++  case Triple::nosuz16:
+   case Triple::msp430:
+   case Triple::nvptx64:
+   case Triple::nvptx:
+@@ -2228,6 +2237,7 @@ bool Triple::isLittleEndian() const {
+   case Triple::loongarch64:
+   case Triple::mips64el:
+   case Triple::mipsel:
++  case Triple::nosuz16:
+   case Triple::msp430:
+   case Triple::nvptx64:
+   case Triple::nvptx:
+@@ -2469,6 +2479,8 @@ bool Triple::isValidVersionForOS(OSType OSKind, const VersionTuple &Version) {
+ }
+ 
+ ExceptionHandling Triple::getDefaultExceptionHandling() const {
++  if (getArch() == nosuz16)
++    return ExceptionHandling::None;
+   if (isOSBinFormatCOFF()) {
+     if (getArch() == Triple::x86 &&
+         (isOSCygMing() || isWindowsItaniumEnvironment()))
+@@ -2501,6 +2513,7 @@ ExceptionHandling Triple::getDefaultExceptionHandling() const {
+   case Triple::hexagon:
+   case Triple::lanai:
+   case Triple::m68k:
++  case Triple::nosuz16:
+   case Triple::msp430:
+   case Triple::systemz:
+   case Triple::xcore:
+diff --git a/llvm/test/CodeGen/Nosuz16/basic.ll b/llvm/test/CodeGen/Nosuz16/basic.ll
+new file mode 100644
+index 000000000..31654462c
+--- /dev/null
++++ b/llvm/test/CodeGen/Nosuz16/basic.ll
+@@ -0,0 +1,33 @@
++; RUN: llc -mtriple=nosuz16 -verify-machineinstrs < %s | FileCheck %s
++; RUN: llc -mtriple=nosuz16 -O0 -verify-machineinstrs < %s | FileCheck %s
++
++define i16 @arithmetic(i16 %a, i16 %b) {
++; CHECK-LABEL: arithmetic:
++; CHECK: add
++; CHECK: xor
++; CHECK: ret
++  %s = add i16 %a, %b
++  %v = xor i16 %s, 12345
++  ret i16 %v
++}
++
++define i16 @compare(i16 %a, i16 %b) {
++; CHECK-LABEL: compare:
++; CHECK: brcc
++; CHECK: ret
++  %c = icmp slt i16 %a, %b
++  %v = select i1 %c, i16 1, i16 0
++  ret i16 %v
++}
++
++declare i16 @llvm.nosuz16.ldw(i16)
++declare void @llvm.nosuz16.stw(i16, i16)
++define i16 @io() {
++; CHECK-LABEL: io:
++; CHECK: ld
++; CHECK: st
++; CHECK: ret
++  %v = call i16 @llvm.nosuz16.ldw(i16 -256)
++  call void @llvm.nosuz16.stw(i16 -256, i16 %v)
++  ret i16 %v
++}
+diff --git a/llvm/test/CodeGen/Nosuz16/lit.local.cfg b/llvm/test/CodeGen/Nosuz16/lit.local.cfg
+new file mode 100644
+index 000000000..2c793d6a5
+--- /dev/null
++++ b/llvm/test/CodeGen/Nosuz16/lit.local.cfg
+@@ -0,0 +1,2 @@
++if "Nosuz16" not in config.root.targets:
++    config.unsupported = True
+diff --git a/llvm/test/CodeGen/Nosuz16/reject-pointer.ll b/llvm/test/CodeGen/Nosuz16/reject-pointer.ll
+new file mode 100644
+index 000000000..9e1c4e9c4
+--- /dev/null
++++ b/llvm/test/CodeGen/Nosuz16/reject-pointer.ll
+@@ -0,0 +1,7 @@
++; RUN: not llc -mtriple=nosuz16 < %s 2>&1 | FileCheck %s
++; CHECK: Nosuz16: generic memory operations unsupported
++
++define i16 @main() {
++  %v = load i16, ptr null
++  ret i16 %v
++}
+diff --git a/llvm/test/CodeGen/Nosuz16/shifts.ll b/llvm/test/CodeGen/Nosuz16/shifts.ll
+new file mode 100644
+index 000000000..e488b7250
+--- /dev/null
++++ b/llvm/test/CodeGen/Nosuz16/shifts.ll
+@@ -0,0 +1,19 @@
++; RUN: llc -mtriple=nosuz16 -verify-machineinstrs < %s | FileCheck %s
++; RUN: llc -mtriple=nosuz16 -O0 -verify-machineinstrs < %s | FileCheck %s
++
++define i16 @left(i16 %a) {
++; CHECK-LABEL: left:
++; CHECK: sll
++; CHECK: ret
++  %v = shl i16 %a, 1
++  ret i16 %v
++}
++
++define i16 @variable(i16 %a, i16 %count) {
++; CHECK-LABEL: variable:
++; CHECK: brcc
++; CHECK: asr
++; CHECK: ret
++  %v = ashr i16 %a, %count
++  ret i16 %v
++}
+diff --git a/llvm/test/MC/Nosuz16/decode.s b/llvm/test/MC/Nosuz16/decode.s
+new file mode 100644
+index 000000000..6b590509a
+--- /dev/null
++++ b/llvm/test/MC/Nosuz16/decode.s
+@@ -0,0 +1,10 @@
++# RUN: llvm-mc -triple=nosuz16 --disassemble %s | FileCheck %s
++# Alternate legal unused rs bits must decode to the same canonical operands.
++0xc7 0x03
++# CHECK: sll r1
++0xff 0x13
++# CHECK: addi r1, -1
++0xc0 0x81
++# CHECK: jalr r0, r7, 0
++0x00 0xf0
++# CHECK: halt
+diff --git a/llvm/test/MC/Nosuz16/encoding.s b/llvm/test/MC/Nosuz16/encoding.s
+new file mode 100644
+index 000000000..e4c41743b
+--- /dev/null
++++ b/llvm/test/MC/Nosuz16/encoding.s
+@@ -0,0 +1,45 @@
++# RUN: llvm-mc -triple=nosuz16 -show-encoding %s | FileCheck %s
++add r1, r2
++# CHECK: add r1, r2 {{.*}}encoding: [0x80,0x02]
++sub r1, r2
++# CHECK: sub r1, r2 {{.*}}encoding: [0x81,0x02]
++addc r1, r2
++# CHECK: addc r1, r2 {{.*}}encoding: [0x82,0x02]
++subc r1, r2
++# CHECK: subc r1, r2 {{.*}}encoding: [0x83,0x02]
++and r1, r2
++# CHECK: and r1, r2 {{.*}}encoding: [0x84,0x02]
++or r1, r2
++# CHECK: or r1, r2 {{.*}}encoding: [0x85,0x02]
++xor r1, r2
++# CHECK: xor r1, r2 {{.*}}encoding: [0x86,0x02]
++sll r1
++# CHECK: sll r1 {{.*}}encoding: [0x07,0x02]
++srl r1
++# CHECK: srl r1 {{.*}}encoding: [0x08,0x02]
++asr r1
++# CHECK: asr r1 {{.*}}encoding: [0x09,0x02]
++addi r1, -32
++# CHECK: addi r1, -32 {{.*}}encoding: [0x60,0x12]
++ld r1, [r2 + 31]
++# CHECK: ld r1, [r2 + 31] {{.*}}encoding: [0x9f,0x22]
++st r1, [r2 - 32]
++# CHECK: st r1, [r2 + -32] {{.*}}encoding: [0xa0,0x32]
++beq r1, r2, -32
++# CHECK: beq r1, r2, -32 {{.*}}encoding: [0xa0,0x42]
++bne r1, r2, 31
++# CHECK: bne r1, r2, 31 {{.*}}encoding: [0x9f,0x52]
++blt r1, r2, -1
++# CHECK: blt r1, r2, -1 {{.*}}encoding: [0xbf,0x62]
++jal r7, -256
++# CHECK: jal r7, -256 {{.*}}encoding: [0x00,0x7f]
++jalr r7, r7, 31
++# CHECK: jalr r7, r7, 31 {{.*}}encoding: [0xdf,0x8f]
++halt
++# CHECK: halt {{.*}}encoding: [0x00,0xf0]
++nop
++# CHECK: jal r0, 0 {{.*}}encoding: [0x00,0x70]
++mov r2, r2
++# CHECK: mov r2, r2 {{.*}}encoding: [0x80,0x14]
++subi r1, 32
++# CHECK: addi r1, -32 {{.*}}encoding: [0x60,0x12]
+diff --git a/llvm/test/MC/Nosuz16/invalid.s b/llvm/test/MC/Nosuz16/invalid.s
+new file mode 100644
+index 000000000..cf0824334
+--- /dev/null
++++ b/llvm/test/MC/Nosuz16/invalid.s
+@@ -0,0 +1,13 @@
++# RUN: not llvm-mc -triple=nosuz16 -filetype=obj %s -o /dev/null 2>&1 | FileCheck %s
++addi r1, 32
++# CHECK: error: immediate out of range
++subi r1, -32
++# CHECK: error: SUBI range is -31..32
++cmp r1, r2, r0
++# CHECK: error: CMP scratch must differ from r0 and both inputs
++cmp r1, r2, r1
++# CHECK: error: CMP scratch must differ from r0 and both inputs
++add r8, r1
++# CHECK: error: expected r0-r7 register
++jal r7, 256
++# CHECK: error: jump offset out of range
+diff --git a/llvm/test/MC/Nosuz16/lit.local.cfg b/llvm/test/MC/Nosuz16/lit.local.cfg
+new file mode 100644
+index 000000000..2c793d6a5
+--- /dev/null
++++ b/llvm/test/MC/Nosuz16/lit.local.cfg
+@@ -0,0 +1,2 @@
++if "Nosuz16" not in config.root.targets:
++    config.unsupported = True
+diff --git a/llvm/unittests/TargetParser/TripleTest.cpp b/llvm/unittests/TargetParser/TripleTest.cpp
+index cc19b1482..ff2171800 100644
+--- a/llvm/unittests/TargetParser/TripleTest.cpp
++++ b/llvm/unittests/TargetParser/TripleTest.cpp
+@@ -19,6 +19,16 @@ using namespace llvm;
+ 
+ namespace {
+ 
++TEST(TripleTest, Nosuz16) {
++  Triple T("nosuz16-unknown-unknown");
++  EXPECT_EQ(Triple::nosuz16, T.getArch());
++  EXPECT_EQ("nosuz16", T.getArchName());
++  EXPECT_TRUE(T.isArch16Bit());
++  EXPECT_TRUE(T.isLittleEndian());
++  EXPECT_EQ(Triple::ELF, T.getObjectFormat());
++  EXPECT_EQ(ExceptionHandling::None, T.getDefaultExceptionHandling());
++}
++
+ TEST(TripleTest, BasicParsing) {
+   Triple T;
+ 
