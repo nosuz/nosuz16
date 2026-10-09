@@ -2,8 +2,9 @@
 
 This backend targets [Nosuz16 v2.4](../Nosuz16_CPU_Spec.md) through
 SelectionDAG and LLVM MC. It compiles a restricted LLVM IR subset to runnable
-word-addressed HEX/BIN images. Clang C support requires the memory-model
-choice discussed in the [implementation plan](../LLVM_BACKEND_PLAN.md).
+word-addressed HEX/BIN images. Clang supports an experimental optimized scalar
+C subset. General C memory support requires the memory-model choice discussed
+in the [implementation plan](../LLVM_BACKEND_PLAN.md).
 
 ## Repository storage
 
@@ -40,6 +41,113 @@ expects `main` to take no arguments and return an `i16` or void.
 `LLVM_BUILD_JOBS` defaults to two; linking uses one job. Build products stay
 inside the ignored LLVM checkout. The backend source and LLVM regression
 tests are carried in [the patch](patches/0001-nosuz16-backend.patch).
+
+## Clang scalar C frontend
+
+The build includes `clang` with a Nosuz16 target. Compile optimized, freestanding
+C with 16-bit `int`/`unsigned int` functions, arithmetic, comparisons, loops,
+and fixed-argument calls. Function arguments and non-void returns must occupy
+one 16-bit word. `char` and boolean intermediates can be promoted within
+word-sized functions.
+
+```sh
+export PATH="/workspaces/llvm-project/build-nosuz16/bin:$PATH"
+clang --target=nosuz16 -ffreestanding -fno-builtin -O2 \
+  -I llvm-nosuz16/include -S llvm-nosuz16/examples/hello.c -o /tmp/hello.s
+./llvm-nosuz16/scripts/compile-c.sh llvm-nosuz16/examples/hello.c /tmp/hello.hex
+cargo run --manifest-path nosuz16/Cargo.toml -- --dump /tmp/hello.hex
+python3 llvm-nosuz16/tests/clang.py
+```
+
+`clang -c` also emits the private MC object format. Use the image builder to
+link these objects with startup and runtime; system linkers and Clang's
+ordinary executable-linking step do not support Nosuz16.
+
+Use `-O1` or `-O2`: optimization must eliminate ordinary C local-variable
+loads/stores before the restricted backend runs. `-O0`, address-taken or
+volatile locals, general pointer dereferences, arrays with memory accesses,
+mutable globals, wider values, floating point, varargs, and standard-library
+calls are outside this subset. The backend rejects unsupported surviving IR.
+
+This frontend retains Clang's eight-bit `char` and byte-based `sizeof`; an
+`int` is 16 bits and `sizeof(int)` is 2. This does **not** implement the proposed
+16-bit-char language model or choose a general byte-pointer mapping. Ordinary
+C pointer accesses remain unsupported. The `__NOSUZ16_SCALAR_C__` macro
+identifies this experimental frontend.
+
+Include [include/nosuz16.h](include/nosuz16.h) for explicit word-memory I/O:
+
+```c
+#include "nosuz16.h"
+int main(void) {
+  nosuz16_stw(NOSUZ16_UART_TXRX, 'A');
+  return nosuz16_ldw(NOSUZ16_UART_STATUS);
+}
+```
+
+These functions map to the existing LLVM word-memory intrinsics. Their
+addresses are CPU word addresses, and unused reads remain observable.
+The header does not require a libc or a sysroot.
+
+### UART character functions
+
+The same header declares `int getc(void)` and `int putc(int c)`, implemented
+in [runtime/console.c](runtime/console.c). These are bare-metal UART functions
+with no `FILE` argument. `getc()` polls RX_READY, consumes one byte, and returns
+0–255, including NUL. It waits indefinitely when no input is available; there
+is no EOF. `putc(c)` polls TX_READY, sends the low eight bits of `c`, and
+returns that byte as an `int`.
+
+Both `compile-c.sh` and `compile.sh` link this runtime automatically. For
+manual object linking, compile `runtime/console.c` with the same target,
+freestanding flags, include directory, and `-O2`, then pass its object to
+`image.py` alongside your program, startup, and arithmetic runtime.
+
+```c
+#include "nosuz16.h"
+int main(void) {
+  return putc(getc());
+}
+```
+
+Try [examples/echo.c](examples/echo.c):
+
+```sh
+./llvm-nosuz16/scripts/compile-c.sh llvm-nosuz16/examples/echo.c /tmp/echo.hex
+cargo run --manifest-path nosuz16/Cargo.toml -- \
+  --uart-input A --dump /tmp/echo.hex
+```
+
+### Formatted UART output
+
+`nosuz16.h` also declares `int printf(const char *format, ...)`. Supported
+conversions are `%d`, `%i`, `%u`, `%x`, `%X`, `%o`, `%c`, `%s`, and `%%`.
+Integer arguments use the 16-bit C `int`/`unsigned int` types. Both the format
+and any `%s` argument must resolve to constant strings. `%c` sends the low
+eight bits, including NUL; `%s` stops at the first NUL. The return value is
+the number of UART bytes written; use messages that fit a signed 16-bit count.
+
+```c
+#include "nosuz16.h"
+int main(void) {
+  return printf("Hello %s! value=%d hex=%X %%\n", "Nosuz16", -123, 0xbeefu);
+}
+```
+
+```sh
+./llvm-nosuz16/scripts/compile-c.sh llvm-nosuz16/examples/printf.c /tmp/printf.hex
+cargo run --manifest-path nosuz16/Cargo.toml -- --dump /tmp/printf.hex
+```
+
+This prints `Hello Nosuz16! value=-123 hex=BEEF %` followed by a newline
+and returns 37. The backend expands literal `printf` calls into fixed-argument
+calls to `putc` and number-formatting helpers in `runtime/console.c`. These
+helpers are linked automatically by the image compiler. Direct Clang object
+users should link that runtime and `runtime/arithmetic.ll` through `image.py`.
+There is no standalone variadic `printf` ABI or function-pointer entry point.
+Dynamic strings, width, precision, flags, length modifiers, floating-point
+conversions, and other specifiers produce a compiler diagnostic. General
+pointers and variadic functions remain outside the scalar C subset.
 
 ## Supported IR and ABI
 
@@ -147,7 +255,10 @@ The patch includes LLVM MC and CodeGen regression tests. Run them with:
 ```sh
 llvm-project/build-nosuz16/bin/llvm-lit -v \
   llvm-project/llvm/test/MC/Nosuz16 \
-  llvm-project/llvm/test/CodeGen/Nosuz16
+  llvm-project/llvm/test/CodeGen/Nosuz16 \
+  llvm-project/clang/test/Preprocessor/init-nosuz16.c \
+  llvm-project/clang/test/CodeGen/Nosuz16
+python3 llvm-nosuz16/tests/clang.py
 llvm-project/build-nosuz16/unittests/TargetParser/TargetParserTests
 ```
 
@@ -158,7 +269,12 @@ object emission, with a bounded instruction limit. Startup seeds r4/r5 with
 sentinels and checks callee preservation and restored sp. The suite also
 runs the emulator's existing Rust tests.
 
-Verified against the pinned LLVM checkout: six MC/CodeGen tests; 32 execution
-cases with 128 guest runs; 713 TargetParser tests passed with four host-platform
-skips; and all 31 emulator tests passed. The standalone build/compile scripts
-also produced and ran the `Hi` example successfully.
+Verified against the pinned LLVM checkout: ten Clang/MC/CodeGen tests;
+32 IR cases with 128 guest runs; 15 C cases with 180 guest runs;
+713 TargetParser tests passed with four host-platform skips; and all 31
+emulator tests passed. Both IR and C compile scripts produced and ran the
+`Hi` example successfully. C execution covers frontend O1/O2, LLVM codegen
+O0/O2, direct Clang assembly/object emission, software arithmetic, calls with
+70 arguments, observable UART reads, the `getc`/`putc` runtime, and literal `printf` formatting. An empty
+UART input also checks that `getc` keeps waiting. Unsupported C cases are checked for
+diagnostics.

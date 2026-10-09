@@ -7,6 +7,7 @@ cmake -S "$llvm_source/llvm" -B "$llvm_build" -G Ninja \
  -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON \
  -DLLVM_USE_LINKER=lld -DLLVM_PARALLEL_LINK_JOBS=1 \
  -DLLVM_TARGETS_TO_BUILD= -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=Nosuz16 \
- -DLLVM_ENABLE_PROJECTS= -DLLVM_INCLUDE_TESTS=ON
+ -DLLVM_ENABLE_PROJECTS=clang -DLLVM_INCLUDE_TESTS=ON \
+ -DCLANG_ENABLE_STATIC_ANALYZER=OFF -DCLANG_ENABLE_ARCMT=OFF
 cmake --build "$llvm_build" --parallel "${LLVM_BUILD_JOBS:-2}" \
- --target llc llvm-mc llvm-objdump llvm-tblgen FileCheck count not llvm-config llvm-readobj opt TargetParserTests
+ --target clang llc llvm-mc llvm-objdump llvm-tblgen FileCheck count not llvm-config llvm-readobj opt TargetParserTests

@@ -1,3 +1,152 @@
+diff --git a/clang/lib/Basic/Targets.cpp b/clang/lib/Basic/Targets.cpp
+index 8c01cfca8..1b7c9eb80 100644
+--- a/clang/lib/Basic/Targets.cpp
++++ b/clang/lib/Basic/Targets.cpp
+@@ -28,6 +28,7 @@
+ #include "Targets/MSP430.h"
+ #include "Targets/Mips.h"
+ #include "Targets/NVPTX.h"
++#include "Targets/Nosuz16.h"
+ #include "Targets/OSTargets.h"
+ #include "Targets/PPC.h"
+ #include "Targets/RISCV.h"
+@@ -283,6 +284,8 @@ std::unique_ptr<TargetInfo> AllocateTarget(const llvm::Triple &Triple,
+ 
+   case llvm::Triple::msp430:
+     return std::make_unique<MSP430TargetInfo>(Triple, Opts);
++  case llvm::Triple::nosuz16:
++    return std::make_unique<Nosuz16TargetInfo>(Triple, Opts);
+ 
+   case llvm::Triple::mips:
+     switch (os) {
+diff --git a/clang/lib/Basic/Targets/Nosuz16.h b/clang/lib/Basic/Targets/Nosuz16.h
+new file mode 100644
+index 000000000..1e74eb0c7
+--- /dev/null
++++ b/clang/lib/Basic/Targets/Nosuz16.h
+@@ -0,0 +1,77 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++#ifndef LLVM_CLANG_LIB_BASIC_TARGETS_NOSUZ16_H
++#define LLVM_CLANG_LIB_BASIC_TARGETS_NOSUZ16_H
++
++#include "clang/Basic/MacroBuilder.h"
++#include "clang/Basic/TargetInfo.h"
++#include "clang/Basic/TargetOptions.h"
++
++namespace clang::targets {
++
++// Experimental scalar C frontend. Generic memory operations are rejected by
++// the backend until a language memory model has been selected. LLVM and Clang
++// still use eight-bit bytes; CPU word addresses use the explicit I/O
++// intrinsics.
++class LLVM_LIBRARY_VISIBILITY Nosuz16TargetInfo final : public TargetInfo {
++public:
++  Nosuz16TargetInfo(const llvm::Triple &Triple, const TargetOptions &)
++      : TargetInfo(Triple) {
++    TLSSupported = false;
++    IntWidth = IntAlign = 16;
++    LongWidth = 32;
++    LongLongWidth = 64;
++    LongAlign = LongLongAlign = 16;
++    FloatWidth = 32;
++    FloatAlign = 16;
++    DoubleWidth = LongDoubleWidth = 64;
++    DoubleAlign = LongDoubleAlign = 16;
++    PointerWidth = PointerAlign = 16;
++    SuitableAlign = 16;
++    SizeType = UnsignedInt;
++    IntMaxType = SignedLongLong;
++    IntPtrType = SignedInt;
++    PtrDiffType = SignedInt;
++    SigAtomicType = SignedInt;
++    MaxAtomicPromoteWidth = 16;
++    MaxAtomicInlineWidth = 0;
++    resetDataLayout();
++  }
++
++  void getTargetDefines(const LangOptions &,
++                        MacroBuilder &Builder) const override {
++    Builder.defineMacro("__NOSUZ16__");
++    Builder.defineMacro("__NOSUZ16_SCALAR_C__");
++    Builder.defineMacro("__NOSUZ16_WORD_BITS__", "16");
++  }
++
++  llvm::SmallVector<Builtin::InfosShard> getTargetBuiltins() const override {
++    return {};
++  }
++  bool isValidCPUName(StringRef Name) const override {
++    return Name == "generic";
++  }
++  bool setCPU(StringRef Name) override { return isValidCPUName(Name); }
++  void fillValidCPUList(SmallVectorImpl<StringRef> &Values) const override {
++    Values.push_back("generic");
++  }
++  bool hasFeature(StringRef Feature) const override {
++    return Feature == "nosuz16";
++  }
++
++  ArrayRef<const char *> getGCCRegNames() const override {
++    static const char *const Names[] = {"r0", "r1", "r2", "r3",
++                                        "r4", "r5", "r6", "r7"};
++    return Names;
++  }
++  ArrayRef<GCCRegAlias> getGCCRegAliases() const override { return {}; }
++  bool validateAsmConstraint(const char *&, ConstraintInfo &) const override {
++    return false;
++  }
++  std::string_view getClobbers() const override { return ""; }
++  BuiltinVaListKind getBuiltinVaListKind() const override {
++    return CharPtrBuiltinVaList;
++  }
++};
++
++} // namespace clang::targets
++#endif
+diff --git a/clang/test/CodeGen/Nosuz16/scalar.c b/clang/test/CodeGen/Nosuz16/scalar.c
+new file mode 100644
+index 000000000..85b7c5cf3
+--- /dev/null
++++ b/clang/test/CodeGen/Nosuz16/scalar.c
+@@ -0,0 +1,25 @@
++// RUN: %clang_cc1 -triple nosuz16 -ffreestanding -O2 -emit-llvm -o - %s | FileCheck %s
++// RUN: %clang_cc1 -triple nosuz16 -ffreestanding -O2 -S -o - %s | FileCheck --check-prefix=ASM %s
++// REQUIRES: nosuz16-registered-target
++
++// CHECK-LABEL: define{{.*}} i16 @add(i16{{.*}}, i16
++// CHECK: add{{.*}} i16
++// ASM-LABEL: add:
++// ASM: add
++// ASM: ret
++int add(int a, int b) { return a + b; }
++
++extern unsigned int read_word(unsigned int) __asm__("llvm.nosuz16.ldw");
++extern void write_word(unsigned int, unsigned int) __asm__("llvm.nosuz16.stw");
++// CHECK-LABEL: define{{.*}} i16 @io(
++// CHECK: call i16 @llvm.nosuz16.ldw(i16
++// CHECK: call void @llvm.nosuz16.stw(i16
++// ASM-LABEL: io:
++// ASM: ld
++// ASM: st
++// ASM: ret
++int io(void) {
++  unsigned int v = read_word(0xff00u);
++  write_word(0xff00u, v);
++  return v;
++}
+diff --git a/clang/test/Preprocessor/init-nosuz16.c b/clang/test/Preprocessor/init-nosuz16.c
+new file mode 100644
+index 000000000..eab40e4dd
+--- /dev/null
++++ b/clang/test/Preprocessor/init-nosuz16.c
+@@ -0,0 +1,8 @@
++// RUN: %clang_cc1 -triple nosuz16 -ffreestanding -E -dM < /dev/null | FileCheck %s
++// CHECK-DAG: #define __CHAR_BIT__ 8
++// CHECK-DAG: #define __INT_MAX__ 32767
++// CHECK-DAG: #define __NOSUZ16__ 1
++// CHECK-DAG: #define __NOSUZ16_SCALAR_C__ 1
++// CHECK-DAG: #define __NOSUZ16_WORD_BITS__ 16
++// CHECK-DAG: #define __SIZEOF_INT__ 2
++// CHECK-DAG: #define __SIZEOF_POINTER__ 2
 diff --git a/llvm/include/llvm/IR/CMakeLists.txt b/llvm/include/llvm/IR/CMakeLists.txt
 index 5a7676b96..998dc41eb 100644
 --- a/llvm/include/llvm/IR/CMakeLists.txt
@@ -190,7 +339,7 @@ index 000000000..8480d8dec
 +extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeNosuz16AsmParser(){RegisterMCAsmParser<Parser> X(getTheNosuz16Target());}
 diff --git a/llvm/lib/Target/Nosuz16/CMakeLists.txt b/llvm/lib/Target/Nosuz16/CMakeLists.txt
 new file mode 100644
-index 000000000..3a3cb8177
+index 000000000..6155e28fb
 --- /dev/null
 +++ b/llvm/lib/Target/Nosuz16/CMakeLists.txt
 @@ -0,0 +1,13 @@
@@ -200,8 +349,8 @@ index 000000000..3a3cb8177
 +tablegen(LLVM Nosuz16GenInstrInfo.inc -gen-instr-info)
 +tablegen(LLVM Nosuz16GenSubtargetInfo.inc -gen-subtarget)
 +add_public_tablegen_target(Nosuz16CommonTableGen)
-+add_llvm_target(Nosuz16CodeGen Nosuz16.cpp Nosuz16AsmPrinter.cpp
-+ LINK_COMPONENTS AsmPrinter CodeGen CodeGenTypes Core MC Nosuz16Desc Nosuz16Info SelectionDAG Support Target TargetParser
++add_llvm_target(Nosuz16CodeGen Nosuz16.cpp Nosuz16AsmPrinter.cpp Nosuz16Printf.cpp
++ LINK_COMPONENTS Analysis AsmPrinter CodeGen CodeGenTypes Core MC Nosuz16Desc Nosuz16Info SelectionDAG Support Target TargetParser
 + ADD_TO_COMPONENT Nosuz16)
 +add_subdirectory(TargetInfo)
 +add_subdirectory(MCTargetDesc)
@@ -432,10 +581,10 @@ index 000000000..949d284c3
 +} }
 diff --git a/llvm/lib/Target/Nosuz16/Nosuz16.cpp b/llvm/lib/Target/Nosuz16/Nosuz16.cpp
 new file mode 100644
-index 000000000..d8470f4da
+index 000000000..9083bb09e
 --- /dev/null
 +++ b/llvm/lib/Target/Nosuz16/Nosuz16.cpp
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,363 @@
 +// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 +#include "Nosuz16.h"
 +#include "TargetInfo/Nosuz16TargetInfo.h"
@@ -593,7 +742,7 @@ index 000000000..d8470f4da
 + setOperationAction(ISD::INTRINSIC_W_CHAIN,MVT::Other,Custom);
 + setOperationAction(ISD::INTRINSIC_VOID,MVT::Other,Custom);
 + for(unsigned Op:{ISD::MUL,ISD::SDIV,ISD::UDIV,ISD::SREM,ISD::UREM,ISD::SDIVREM,ISD::UDIVREM,ISD::MULHS,ISD::MULHU,ISD::SMUL_LOHI,ISD::UMUL_LOHI})setOperationAction(Op,MVT::i16,Expand);
-+ for(unsigned Op:{ISD::SIGN_EXTEND_INREG,ISD::ROTL,ISD::ROTR,ISD::BSWAP,ISD::BITREVERSE,ISD::CTPOP,ISD::CTLZ,ISD::CTTZ,ISD::CTLZ_ZERO_POISON,ISD::CTTZ_ZERO_POISON,ISD::SMIN,ISD::SMAX,ISD::UMIN,ISD::UMAX})setOperationAction(Op,MVT::i16,Expand);
++ for(unsigned Op:{ISD::SIGN_EXTEND_INREG,ISD::ROTL,ISD::ROTR,ISD::BSWAP,ISD::BITREVERSE,ISD::CTPOP,ISD::CTLZ,ISD::CTTZ,ISD::CTLZ_ZERO_POISON,ISD::CTTZ_ZERO_POISON,ISD::SMIN,ISD::SMAX,ISD::UMIN,ISD::UMAX,ISD::ABS})setOperationAction(Op,MVT::i16,Expand);
 + setOperationAction(ISD::BR_JT,MVT::Other,Expand);
 + setOperationAction(ISD::GlobalAddress,MVT::i16,Custom);
 +}
@@ -778,7 +927,7 @@ index 000000000..d8470f4da
 +   if(auto *C=dyn_cast<CallBase>(&I)) {
 +    if(C->isInlineAsm())report_fatal_error("Nosuz16: inline assembly in IR unsupported",false);
 +    if(!C->getCalledFunction())report_fatal_error("Nosuz16: indirect calls unsupported",false);
-+    for(auto &A:C->args())if(!A->getType()->isIntegerTy(16))report_fatal_error("Nosuz16: call arguments must be i16",false);
++    if(!C->getCalledFunction()->isIntrinsic())for(auto &A:C->args())if(!A->getType()->isIntegerTy(16))report_fatal_error("Nosuz16: call arguments must be i16",false);
 +   }
 +  }
 +  return false;
@@ -786,7 +935,7 @@ index 000000000..d8470f4da
 +};char N16Validate::ID;
 +class N16PassConfig : public TargetPassConfig {
 +public:N16PassConfig(N16TargetMachine &TM,PassManagerBase &PM):TargetPassConfig(TM,PM) {}
-+ void addIRPasses() override {addPass(new N16Validate());TargetPassConfig::addIRPasses();}
++ void addIRPasses() override {addPass(createNosuz16PrintfPass());addPass(new N16Validate());TargetPassConfig::addIRPasses();}
 + bool addInstSelector() override {addPass(new N16SelectorLegacy(getTM<N16TargetMachine>(),getOptLevel()));return false;}
 +};
 +}
@@ -796,14 +945,15 @@ index 000000000..d8470f4da
 +extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeNosuz16Target() {
 + initializeN16SelectorLegacyPass(*PassRegistry::getPassRegistry());
 + initializeN16ValidatePass(*PassRegistry::getPassRegistry());
++ initializeN16PrintfPass(*PassRegistry::getPassRegistry());
 + RegisterTargetMachine<N16TargetMachine> TM(getTheNosuz16Target());
 +}
 diff --git a/llvm/lib/Target/Nosuz16/Nosuz16.h b/llvm/lib/Target/Nosuz16/Nosuz16.h
 new file mode 100644
-index 000000000..bba8c78f5
+index 000000000..271efc7cf
 --- /dev/null
 +++ b/llvm/lib/Target/Nosuz16/Nosuz16.h
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,96 @@
 +// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 +#pragma once
 +#include "MCTargetDesc/Nosuz16MC.h"
@@ -824,6 +974,8 @@ index 000000000..bba8c78f5
 +class PassRegistry;
 +void initializeN16SelectorLegacyPass(PassRegistry &);
 +void initializeN16ValidatePass(PassRegistry &);
++void initializeN16PrintfPass(PassRegistry &);
++ModulePass *createNosuz16PrintfPass();
 +namespace N16ISD { enum { RET=ISD::BUILTIN_OP_END, CALL, BRCC, SELECT, SHL, SRL, SRA, SHL1, SRL1, SRA1, LDW, STW }; }
 +class N16RegisterInfo final : public Nosuz16GenRegisterInfo {
 +public:
@@ -1023,6 +1175,142 @@ index 000000000..1c416854b
 +extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeNosuz16AsmPrinter() {
 + RegisterAsmPrinter<N16AsmPrinter> AP(getTheNosuz16Target());
 +}
+diff --git a/llvm/lib/Target/Nosuz16/Nosuz16Printf.cpp b/llvm/lib/Target/Nosuz16/Nosuz16Printf.cpp
+new file mode 100644
+index 000000000..4c03fc945
+--- /dev/null
++++ b/llvm/lib/Target/Nosuz16/Nosuz16Printf.cpp
+@@ -0,0 +1,130 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++#include "Nosuz16.h"
++#include "llvm/Analysis/ValueTracking.h"
++#include "llvm/IR/Constants.h"
++#include "llvm/IR/IRBuilder.h"
++#include "llvm/IR/InstIterator.h"
++#include "llvm/IR/Module.h"
++#include "llvm/Pass.h"
++#include "llvm/Support/ErrorHandling.h"
++
++using namespace llvm;
++
++namespace {
++// This deliberately supports literals without defining a general pointer or
++// variadic ABI. All emitted calls use the existing fixed i16 calling
++// convention.
++class N16Printf final : public ModulePass {
++public:
++  static char ID;
++  N16Printf() : ModulePass(ID) {}
++
++  bool runOnModule(Module &M) override {
++    SmallVector<CallInst *> Calls;
++    for (Function &F : M)
++      for (Instruction &I : instructions(F))
++        if (auto *C = dyn_cast<CallInst>(&I))
++          if (Function *Callee = C->getCalledFunction())
++            if (Callee->getName() == "printf" && Callee->isDeclaration())
++              Calls.push_back(C);
++    if (Calls.empty())
++      return false;
++
++    auto Fail = [](const Twine &Reason) {
++      report_fatal_error(Twine("Nosuz16 printf: ") + Reason, false);
++    };
++    Type *Word = Type::getInt16Ty(M.getContext());
++    for (CallInst *C : Calls) {
++      StringRef Format;
++      if (!C->getType()->isIntegerTy(16) || C->arg_empty() ||
++          !getConstantStringInfo(C->getArgOperand(0), Format))
++        Fail("format must be a constant string and return type must be i16");
++      if (C->isMustTailCall() || C->getCallingConv() != CallingConv::C ||
++          C->hasOperandBundles())
++        Fail("unsupported call attributes");
++      IRBuilder<> B(C);
++      B.SetCurrentDebugLocation(C->getDebugLoc());
++      FunctionCallee Putc = M.getOrInsertFunction("putc", Word, Word);
++      Value *Count = B.getInt16(0);
++      auto EmitByte = [&](Value *Byte) {
++        B.CreateCall(Putc, {Byte});
++        Count = B.CreateAdd(Count, B.getInt16(1));
++      };
++      auto EmitText = [&](StringRef Text) {
++        for (unsigned char Byte : Text.bytes())
++          EmitByte(B.getInt16(Byte));
++      };
++      unsigned Argument = 1;
++      for (size_t Position = 0; Position < Format.size(); ++Position) {
++        unsigned char Ch = Format[Position];
++        if (Ch != '%') {
++          EmitByte(B.getInt16(Ch));
++          continue;
++        }
++        if (++Position == Format.size())
++          Fail("incomplete conversion");
++        Ch = Format[Position];
++        if (Ch == '%') {
++          EmitByte(B.getInt16('%'));
++          continue;
++        }
++        if (Ch != 'd' && Ch != 'i' && Ch != 'u' && Ch != 'x' && Ch != 'X' &&
++            Ch != 'o' && Ch != 'c' && Ch != 's')
++          Fail(
++              "unsupported conversion (supported: %d %i %u %x %X %o %c %s %%)");
++        if (Argument >= C->arg_size())
++          Fail("missing conversion argument");
++        Value *V = C->getArgOperand(Argument++);
++        if (Ch == 's') {
++          StringRef Text;
++          if (!getConstantStringInfo(V, Text))
++            Fail("%s requires a constant string");
++          EmitText(Text);
++          continue;
++        }
++        if (!V->getType()->isIntegerTy(16))
++          Fail("integer conversion arguments must be i16");
++        if (Ch == 'c') {
++          EmitByte(V);
++          continue;
++        }
++        Value *Written;
++        if (Ch == 'd' || Ch == 'i') {
++          auto Print =
++              M.getOrInsertFunction("__nosuz16_print_signed", Word, Word);
++          Written = B.CreateCall(Print, {V});
++        } else {
++          auto Print = M.getOrInsertFunction("__nosuz16_print_unsigned", Word,
++                                             Word, Word, Word);
++          unsigned Base = (Ch == 'o') ? 8 : (Ch == 'u') ? 10 : 16;
++          Written =
++              B.CreateCall(Print, {V, B.getInt16(Base), B.getInt16(Ch == 'X')});
++        }
++        Count = B.CreateAdd(Count, Written);
++      }
++      C->replaceAllUsesWith(Count);
++      C->eraseFromParent();
++    }
++    // Literal bytes were emitted as immediate UART arguments. Remove their
++    // dead storage so it cannot reach the word-only object/image pipeline.
++    for (auto I = M.global_begin(), End = M.global_end(); I != End;) {
++      GlobalVariable &G = *I++;
++      if (!G.hasLocalLinkage() || !G.isConstant() || !G.hasInitializer())
++        continue;
++      auto *Array = dyn_cast<ArrayType>(G.getValueType());
++      if (!Array || !Array->getElementType()->isIntegerTy(8))
++        continue;
++      G.removeDeadConstantUsers();
++      if (G.use_empty())
++        G.eraseFromParent();
++    }
++    return true;
++  }
++};
++char N16Printf::ID;
++} // namespace
++
++INITIALIZE_PASS(N16Printf, "nosuz16-printf", "Nosuz16 literal printf expansion",
++                false, false)
++
++ModulePass *llvm::createNosuz16PrintfPass() { return new N16Printf(); }
 diff --git a/llvm/lib/Target/Nosuz16/TargetInfo/CMakeLists.txt b/llvm/lib/Target/Nosuz16/TargetInfo/CMakeLists.txt
 new file mode 100644
 index 000000000..75e03de20
@@ -1056,7 +1344,7 @@ index 000000000..d8a3ab9d9
 +#pragma once
 +namespace llvm { class Target; Target &getTheNosuz16Target(); }
 diff --git a/llvm/lib/TargetParser/TargetDataLayout.cpp b/llvm/lib/TargetParser/TargetDataLayout.cpp
-index 83bc4a624..e968df4b7 100644
+index 83bc4a624..64d368e01 100644
 --- a/llvm/lib/TargetParser/TargetDataLayout.cpp
 +++ b/llvm/lib/TargetParser/TargetDataLayout.cpp
 @@ -627,6 +627,8 @@ std::string Triple::computeDataLayout(StringRef ABIName) const {
@@ -1064,7 +1352,7 @@ index 83bc4a624..e968df4b7 100644
    case Triple::mips64el:
      return computeMipsDataLayout(*this, ABIName);
 +  case Triple::nosuz16:
-+    return "e-m:e-p:16:16-i16:16-i32:16-i64:16-n16-S16";
++    return "e-m:e-p:16:16-i16:16-i32:16-i64:16-f32:16-f64:16-n16-S16";
    case Triple::msp430:
      return "e-m:e-p:16:16-i32:16-i64:16-f32:16-f64:16-a:8-n8:16-S16";
    case Triple::ppc:
@@ -1209,6 +1497,51 @@ index 000000000..2c793d6a5
 @@ -0,0 +1,2 @@
 +if "Nosuz16" not in config.root.targets:
 +    config.unsupported = True
+diff --git a/llvm/test/CodeGen/Nosuz16/printf-dynamic.ll b/llvm/test/CodeGen/Nosuz16/printf-dynamic.ll
+new file mode 100644
+index 000000000..2bc4a5087
+--- /dev/null
++++ b/llvm/test/CodeGen/Nosuz16/printf-dynamic.ll
+@@ -0,0 +1,8 @@
++; RUN: not llc -mtriple=nosuz16 < %s 2>&1 | FileCheck %s
++; CHECK: Nosuz16 printf: format must be a constant string
++
++declare i16 @printf(ptr, ...)
++define i16 @main() {
++  %count = call i16 (ptr, ...) @printf(ptr inttoptr (i16 16384 to ptr))
++  ret i16 %count
++}
+diff --git a/llvm/test/CodeGen/Nosuz16/printf.ll b/llvm/test/CodeGen/Nosuz16/printf.ll
+new file mode 100644
+index 000000000..eb1797501
+--- /dev/null
++++ b/llvm/test/CodeGen/Nosuz16/printf.ll
+@@ -0,0 +1,25 @@
++; RUN: llc -mtriple=nosuz16 -verify-machineinstrs < %s | FileCheck %s
++; RUN: llc -mtriple=nosuz16 -O0 -verify-machineinstrs < %s | FileCheck %s
++
++@format = private constant [12 x i8] c"value=%d %%\00"
++@empty = private constant [1 x i8] zeroinitializer
++declare i16 @printf(ptr, ...)
++
++; CHECK-LABEL: main:
++; CHECK: lcall putc
++; CHECK: lcall __nosuz16_print_signed
++; CHECK: ret
++define i16 @main() {
++  %count = call i16 (ptr, ...) @printf(ptr @format, i16 -32768)
++  ret i16 %count
++}
++
++; CHECK-LABEL: empty_format:
++; CHECK-NOT: lcall
++; CHECK: ret
++; CHECK-NOT: .asciz
++; CHECK-NOT: .zero
++define i16 @empty_format() {
++  %count = call i16 (ptr, ...) @printf(ptr @empty)
++  ret i16 %count
++}
 diff --git a/llvm/test/CodeGen/Nosuz16/reject-pointer.ll b/llvm/test/CodeGen/Nosuz16/reject-pointer.ll
 new file mode 100644
 index 000000000..9e1c4e9c4

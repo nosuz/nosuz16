@@ -17,5 +17,9 @@ trap 'rm -rf -- "$temporary"' EXIT
   "$project_root/llvm-nosuz16/runtime/start.s" -o "$temporary/start.o"
 "$llvm_build/bin/llc" -mtriple=nosuz16 -verify-machineinstrs -filetype=obj \
   "$project_root/llvm-nosuz16/runtime/arithmetic.ll" -o "$temporary/arithmetic.o"
+"$llvm_build/bin/clang" --target=nosuz16 -ffreestanding -fno-builtin -O2 \
+  -I "$project_root/llvm-nosuz16/include" -c \
+  "$project_root/llvm-nosuz16/runtime/console.c" -o "$temporary/console.o"
 python3 "$project_root/llvm-nosuz16/scripts/image.py" \
-  "$temporary/start.o" "$temporary/program.o" "$temporary/arithmetic.o" -o "$2"
+  "$temporary/start.o" "$temporary/program.o" "$temporary/arithmetic.o" \
+  "$temporary/console.o" -o "$2"

@@ -19,10 +19,13 @@ The initial IR-to-image milestone is implemented in
 [llvm-nosuz16/](llvm-nosuz16/README.md), with the LLVM source delivered as a
 patch against the recorded revision. Stages 1–6 are implemented and tested;
 Stage 7 includes software `i16` multiply/divide/remainder helpers. Wider
-arithmetic, Clang integration, the long-term memory model, and a public ELF/LLD
-ABI remain future work.
+arithmetic, general C memory access, the long-term memory model, and a public
+ELF/LLD ABI remain future work. An experimental Clang frontend now supports
+optimized scalar C with word-sized function signatures and explicit word I/O;
+its eight-bit `char` does not define the eventual CPU memory mapping.
 
-Validation passed: six LLVM MC/CodeGen tests, 32 execution cases at O0/O2
+Validation passed: ten Clang/LLVM MC/CodeGen tests, 15 C cases with
+180 guest executions, 32 IR execution cases at O0/O2
 through assembly and direct-object paths (128 guest executions), 713 LLVM
 TargetParser unit tests (four platform-specific skips), and all 31 Rust
 emulator tests. The example prints `Hi` and returns 42 with sp restored to
@@ -114,18 +117,20 @@ cmake -S llvm-project/llvm -B llvm-project/build-nosuz16 -G Ninja \
   -DLLVM_PARALLEL_LINK_JOBS=1 \
   -DLLVM_TARGETS_TO_BUILD="" \
   -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=Nosuz16 \
-  -DLLVM_ENABLE_PROJECTS="" \
+  -DLLVM_ENABLE_PROJECTS=clang \
+  -DCLANG_ENABLE_STATIC_ANALYZER=OFF \
+  -DCLANG_ENABLE_ARCMT=OFF \
   -DLLVM_INCLUDE_TESTS=ON
 
 cmake --build llvm-project/build-nosuz16 --parallel 2 \
-  --target llc llvm-mc llvm-objdump llvm-tblgen FileCheck count not \
+  --target clang llc llvm-mc llvm-objdump llvm-tblgen FileCheck count not \
     llvm-config llvm-readobj opt TargetParserTests
 ```
 
 The experimental-target option requires the target to have been registered;
 apply the tracked patch before using this configuration. Build further tools required by individual tests as the
-test suite grows. Keep Clang and LLD target integration out of this build
-until their implementation stages.
+test suite grows. This configuration includes the restricted scalar Clang
+frontend; Nosuz16 LLD integration remains future work.
 
 **Completion:** a clean build from the recorded baseline and patches is
 reproducible without changing system packages.
@@ -245,13 +250,22 @@ integer operations. Extend legalization and define the ABI for any additional
 multiword argument types. Test carry and borrow chains used by wider values.
 
 Resolve the long-term memory model before implementing general pointers,
-arrays, structures, memory intrinsics, or Clang target support. Define the
+arrays, structures, memory intrinsics, or general Clang memory access. Define the
 language data model, object layout, pointer conversions, null pointer
 representation, and volatile I/O rules consistently.
 
-Then add Clang target integration and the selected C subset. Add ELF
-relocations and LLD integration when separate compilation is required.
+The scalar Clang target is implemented independently of that decision. It
+requires frontend optimization (O1/O2) to eliminate ordinary local loads and
+stores, and exposes word I/O through `nosuz16.h`. Expand this subset after
+choosing the memory model. Add ELF relocations and LLD integration for a
+standard object/linking workflow; the current private object format and image
+builder already support separate compilation.
 Floating-point runtime support and debugging information are later extensions.
+
+Literal `printf` calls are supported through a target IR expansion pass,
+with fixed-argument UART and integer-formatting helpers. Constant format and
+`%s` strings avoid a general pointer or variadic ABI; dynamic strings and
+full libc formatting remain future work.
 
 **Completion:** the supported language and ABI are documented, and compiled
 C programs pass execution tests without relying on host data-layout defaults.

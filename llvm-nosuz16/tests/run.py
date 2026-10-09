@@ -30,7 +30,8 @@ def assemble(source, target):
     run([TOOLS / 'llvm-mc', '-triple=nosuz16', '-filetype=obj', '-o', target], input=source)
 
 
-def execute(directory, name, ir, expected, runtime=None, output='', input_text='', startup=None):
+def execute(directory, name, ir, expected, runtime=None, output='', input_text='', startup=None,
+            extra_objects=()):
     ll = directory / f'{name}.ll'
     ll.write_text(ir)
     start = directory / 'start.o'
@@ -44,7 +45,8 @@ def execute(directory, name, ir, expected, runtime=None, output='', input_text='
              '-filetype=obj', ll, '-o', direct])
         for object_file in (obj, direct):
             image = directory / f'{name}-{level}.bin'
-            run(['python3', IMAGE, start, object_file, *([runtime] if runtime else []), '-o', image])
+            run(['python3', IMAGE, start, object_file, *([runtime] if runtime else []),
+                 *extra_objects, '-o', image])
             result = run([EMU, '--dump', '--max-steps', '1000000', '--uart-input', input_text, image])
             assert result.stdout == output, (name, level, result.stdout, output)
             registers = dict((int(index), int(value, 16)) for index, value in
