@@ -7,11 +7,11 @@ use std::process::ExitCode;
 
 const HELP: &str = "Usage: nosuz16 [OPTIONS] PROGRAM
 
-Run a Nosuz16 v2.4 machine-code image. UART output is written to stdout.
+Run a Nosuz16 v2.5 machine-code image. UART output is written to stdout.
 
 Options:
   --format hex|bin       Image format (default: bin for .bin, otherwise hex)
-  --load-address ADDR    First word address (default: 0)
+  --load-address ADDR    First byte address (default: 0)
   --entry ADDR           Initial PC (default: load address)
   --max-steps COUNT     Instruction limit (default: 1000000)
   --uart-input TEXT     Queue UTF-8 bytes for UART reads
@@ -21,7 +21,7 @@ Options:
 
 Addresses accept decimal or 0x-prefixed hexadecimal. Hex images contain
 whitespace-separated 16-bit words; #, ; and // introduce line comments.
-Binary images contain little-endian 16-bit words. SYSTEM word F000 halts.
+Binary images contain packed bytes; odd byte lengths are valid. SYSTEM word F000 halts.
 ";
 
 #[derive(Default)]
@@ -49,7 +49,7 @@ fn number(value: &str) -> Result<u64, String> {
 }
 
 fn address(value: &str) -> Result<u16, String> {
-    u16::try_from(number(value)?).map_err(|_| format!("word address out of range: {value}"))
+    u16::try_from(number(value)?).map_err(|_| format!("byte address out of range: {value}"))
 }
 
 fn options() -> Result<Option<Options>, String> {
@@ -142,17 +142,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let bytes = fs::read(path)?;
-    let words = match format {
+    let image = match format {
         "bin" => parse_binary(&bytes)?,
-        _ => parse_hex(std::str::from_utf8(&bytes)?)?,
+        _ => {
+            if options.origin & 1 != 0 {
+                return Err("HEX word load address must be even".into());
+            }
+            parse_hex(std::str::from_utf8(&bytes)?)?
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        }
     };
-    if words.is_empty() {
+    if image.is_empty() {
         return Err("program image is empty".into());
     }
+    let entry = options.entry.unwrap_or(options.origin);
+    if entry & 1 != 0 {
+        return Err("entry byte address must be even".into());
+    }
     let mut memory = Memory::default();
-    memory.load(options.origin, &words)?;
+    memory.load_bytes(options.origin, &image)?;
     memory.queue_uart_input(options.input.bytes());
-    let mut cpu = Cpu::new(options.entry.unwrap_or(options.origin));
+    let mut cpu = Cpu::new(entry);
     let max_steps = options.max_steps.unwrap_or(1_000_000);
     let mut output = io::stdout().lock();
     let mut halted = false;

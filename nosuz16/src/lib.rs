@@ -1,25 +1,29 @@
-//! Emulator for the Nosuz16 v2.4 word-addressed CPU.
+//! Emulator for the Nosuz16 v2.5 byte-addressed CPU.
 //!
-//! See the specification for flag rules and the N16-REF-1 SYSTEM/I/O profile.
+//! See the specification for flag rules and the N16-REF-2 SYSTEM/I/O profile.
 
 use std::collections::VecDeque;
 use std::fmt;
 
-pub const MEMORY_WORDS: usize = 65_536;
+pub const MEMORY_BYTES: usize = 65_536;
+pub const MEMORY_WORDS: usize = MEMORY_BYTES / 2;
 pub const UART_DATA: u16 = 0xff00;
-pub const UART_STATUS: u16 = 0xff01;
+pub const UART_STATUS: u16 = 0xff02;
 pub const VIDEO: u16 = 0xff10;
 pub const HALT: u16 = 0xf000;
 
-/// A word-addressed bus. Reads may have side effects, such as consuming UART input.
+/// A byte-addressed bus. Word transactions require even addresses.
+/// Reads may have side effects, such as consuming UART input.
 pub trait Bus {
     fn read(&mut self, address: u16) -> u16;
     fn write(&mut self, address: u16, value: u16);
+    fn read_byte(&mut self, address: u16) -> u8;
+    fn write_byte(&mut self, address: u16, value: u8);
 }
 
-/// N16-REF-1 unified RAM, UART at FF00/FF01, and VIDEO data at FF10.
+/// N16-REF-2 unified RAM, UART at FF00/FF02, and VIDEO data at FF10.
 pub struct Memory {
-    words: Box<[u16]>,
+    bytes: Box<[u8]>,
     uart_input: VecDeque<u8>,
     uart_output: Vec<u8>,
 }
@@ -27,7 +31,7 @@ pub struct Memory {
 impl Default for Memory {
     fn default() -> Self {
         Self {
-            words: vec![0; MEMORY_WORDS].into_boxed_slice(),
+            bytes: vec![0; MEMORY_BYTES].into_boxed_slice(),
             uart_input: VecDeque::new(),
             uart_output: Vec::new(),
         }
@@ -40,22 +44,39 @@ impl Memory {
     pub fn reset_devices(&mut self) {
         self.uart_input.clear();
         self.uart_output.clear();
-        self.words[usize::from(VIDEO)] = 0;
+        self.bytes[usize::from(VIDEO)] = 0;
+        self.bytes[usize::from(VIDEO) + 1] = 0;
     }
 
     /// Load raw storage without triggering memory-mapped I/O.
     pub fn load(&mut self, origin: u16, words: &[u16]) -> Result<(), LoadError> {
+        if origin & 1 != 0 {
+            return Err(LoadError::UnalignedHexOrigin);
+        }
+        let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        self.load_bytes(origin, &bytes)
+    }
+
+    /// Load packed byte storage without device transactions, including odd sizes.
+    pub fn load_bytes(&mut self, origin: u16, bytes: &[u8]) -> Result<(), LoadError> {
         let start = usize::from(origin);
-        if words.len() > MEMORY_WORDS - start {
+        if bytes.len() > MEMORY_BYTES - start {
             return Err(LoadError::TooLarge);
         }
-        self.words[start..start + words.len()].copy_from_slice(words);
+        self.bytes[start..start + bytes.len()].copy_from_slice(bytes);
         Ok(())
     }
 
     /// Inspect backing storage without I/O side effects.
     pub fn peek(&self, address: u16) -> u16 {
-        self.words[usize::from(address)]
+        u16::from_le_bytes([
+            self.peek_byte(address),
+            self.peek_byte(address.wrapping_add(1)),
+        ])
+    }
+
+    pub fn peek_byte(&self, address: u16) -> u8 {
+        self.bytes[usize::from(address)]
     }
 
     pub fn queue_uart_input(&mut self, bytes: impl IntoIterator<Item = u8>) {
@@ -69,6 +90,7 @@ impl Memory {
 
 impl Bus for Memory {
     fn read(&mut self, address: u16) -> u16 {
+        assert_eq!(address & 1, 0, "word bus address must be even");
         match address {
             UART_DATA => self.uart_input.pop_front().map(u16::from).unwrap_or(0),
             UART_STATUS => 2 | u16::from(!self.uart_input.is_empty()),
@@ -77,10 +99,30 @@ impl Bus for Memory {
     }
 
     fn write(&mut self, address: u16, value: u16) {
+        assert_eq!(address & 1, 0, "word bus address must be even");
         match address {
             UART_DATA => self.uart_output.push(value as u8),
             UART_STATUS => {}
-            _ => self.words[usize::from(address)] = value,
+            _ => {
+                let pair = value.to_le_bytes();
+                self.bytes[usize::from(address)] = pair[0];
+                self.bytes[usize::from(address) + 1] = pair[1];
+            }
+        }
+    }
+    fn read_byte(&mut self, address: u16) -> u8 {
+        match address {
+            UART_DATA => self.uart_input.pop_front().unwrap_or(0),
+            0xff01 | 0xff03 => 0,
+            UART_STATUS => 2 | u8::from(!self.uart_input.is_empty()),
+            _ => self.peek_byte(address),
+        }
+    }
+    fn write_byte(&mut self, address: u16, value: u8) {
+        match address {
+            UART_DATA => self.uart_output.push(value),
+            0xff01 | UART_STATUS | 0xff03 => {}
+            _ => self.bytes[usize::from(address)] = value,
         }
     }
 }
@@ -112,16 +154,34 @@ pub enum StepOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuError {
     pub pc: u16,
-    pub instruction: u16,
+    pub instruction: Option<u16>,
+    pub kind: FaultKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultKind {
+    IllegalInstruction,
+    Alignment {
+        access: &'static str,
+        address: u16,
+    },
 }
 
 impl fmt::Display for CpuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "illegal instruction {:04X} at word address {:04X}",
-            self.instruction, self.pc
-        )
+        match self.kind {
+            FaultKind::IllegalInstruction => write!(
+                f,
+                "illegal instruction {:04X} at byte address {:04X}",
+                self.instruction.unwrap(),
+                self.pc
+            ),
+            FaultKind::Alignment { access, address } => write!(
+                f,
+                "alignment fault: {access} at byte address {address:04X}, PC={:04X}",
+                self.pc
+            ),
+        }
     }
 }
 
@@ -135,7 +195,7 @@ impl Cpu {
         }
     }
 
-    /// Restore v2.4 CPU reset state, including PC=0 and sp=0.
+    /// Restore v2.5 CPU reset state, including PC=0 and sp=0.
     /// Memory and devices are untouched; guest startup code initializes sp.
     pub fn reset(&mut self) {
         *self = Self::default();
@@ -170,7 +230,7 @@ impl Cpu {
         self.halted
     }
 
-    /// Execute one instruction. An illegal instruction preserves PC, registers,
+    /// Execute one instruction. An illegal instruction or alignment fault preserves PC, registers,
     /// flags, and data memory, and latches a fault. Subsequent steps return that
     /// error without accessing the bus until reset or debugger resume.
     /// The initial instruction-fetch side effects cannot be rolled back.
@@ -181,15 +241,28 @@ impl Cpu {
         if self.halted {
             return Ok(StepOutcome::Halted);
         }
+        if self.pc & 1 != 0 {
+            let error = CpuError {
+                pc: self.pc,
+                instruction: None,
+                kind: FaultKind::Alignment {
+                    access: "fetch",
+                    address: self.pc,
+                },
+            };
+            self.fault = Some(error);
+            return Err(error);
+        }
         let instruction = bus.read(self.pc);
         let opcode = instruction >> 12;
         let rd = usize::from((instruction >> 9) & 7);
         let rs = usize::from((instruction >> 6) & 7);
         let func = instruction & 0x3f;
-        if (opcode > 8 && instruction != HALT) || (opcode == 0 && func > 9) {
+        if (opcode > 10 && instruction != HALT) || (opcode == 0 && func > 9) {
             let error = CpuError {
                 pc: self.pc,
-                instruction,
+                instruction: Some(instruction),
+                kind: FaultKind::IllegalInstruction,
             };
             self.fault = Some(error);
             return Err(error);
@@ -197,7 +270,24 @@ impl Cpu {
         let imm = sign_extend(instruction & 0x3f, 6);
         let a = self.registers[rd];
         let b = self.registers[rs];
-        self.pc = self.pc.wrapping_add(1);
+        let address = b.wrapping_add(imm);
+        if matches!(opcode, 2 | 3 | 8) && address & 1 != 0 {
+            let error = CpuError {
+                pc: self.pc,
+                instruction: Some(instruction),
+                kind: FaultKind::Alignment {
+                    access: match opcode {
+                        2 => "load",
+                        3 => "store",
+                        _ => "jump",
+                    },
+                    address,
+                },
+            };
+            self.fault = Some(error);
+            return Err(error);
+        }
+        self.pc = self.pc.wrapping_add(2);
         match opcode {
             0 => {
                 let result = match func {
@@ -232,18 +322,20 @@ impl Cpu {
                     _ => unreachable!(),
                 };
                 if taken {
-                    self.pc = self.pc.wrapping_add(imm);
+                    self.pc = self.pc.wrapping_add(imm.wrapping_mul(2));
                 }
             }
             7 => {
                 self.set_register(rd, self.pc);
-                self.pc = self.pc.wrapping_add(sign_extend(instruction & 0x1ff, 9));
+                self.pc = self.pc.wrapping_add(sign_extend(instruction & 0x1ff, 9).wrapping_mul(2));
             }
             8 => {
                 // b was read before updating rd, including when rd == rs.
                 self.set_register(rd, self.pc);
                 self.pc = b.wrapping_add(imm);
             }
+            9 => { let value = bus.read_byte(address); self.set_register(rd, u16::from(value)); }
+            10 => bus.write_byte(address, a as u8),
             15 => {
                 self.halted = true;
                 return Ok(StepOutcome::Halted);
@@ -300,15 +392,15 @@ fn sign_extend(value: u16, bits: u32) -> u16 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {
     TooLarge,
-    OddBinaryLength,
+    UnalignedHexOrigin,
     InvalidHex { line: usize, token: String },
 }
 
 impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TooLarge => write!(f, "program exceeds the 64K-word address space"),
-            Self::OddBinaryLength => write!(f, "binary image must contain an even number of bytes"),
+            Self::TooLarge => write!(f, "program exceeds the 64-KiB byte address space"),
+            Self::UnalignedHexOrigin => write!(f, "HEX word load address must be even"),
             Self::InvalidHex { line, token } => {
                 write!(f, "invalid hexadecimal word {token:?} on line {line}")
             }
@@ -347,16 +439,10 @@ pub fn parse_hex(source: &str) -> Result<Vec<u16>, LoadError> {
     Ok(words)
 }
 
-/// Binary file serialization uses little-endian byte pairs, independent of CPU addressing.
-pub fn parse_binary(bytes: &[u8]) -> Result<Vec<u16>, LoadError> {
-    let pairs = bytes.chunks_exact(2);
-    if !pairs.remainder().is_empty() {
-        return Err(LoadError::OddBinaryLength);
-    }
-    if pairs.len() > MEMORY_WORDS {
+/// BIN images are packed bytes; odd byte lengths are valid.
+pub fn parse_binary(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
+    if bytes.len() > MEMORY_BYTES {
         return Err(LoadError::TooLarge);
     }
-    Ok(pairs
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-        .collect())
+    Ok(bytes.to_vec())
 }

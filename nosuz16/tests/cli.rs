@@ -47,7 +47,7 @@ fn hello_program_outputs_uart_and_halts() {
     );
     assert_eq!(output.stdout, b"Hi\n");
     let state = String::from_utf8(output.stderr).unwrap();
-    assert!(state.contains("PC=0014"));
+    assert!(state.contains("PC=0028"));
     assert!(state.contains("halted=true"));
 }
 
@@ -92,7 +92,7 @@ fn binary_images_use_little_endian_words_and_explicit_entry() {
     // Skip illegal word at the load address; execute ADDI r1,1 and HALT.
     let image = Image::new("bin", &[0x00, 0x90, 0x41, 0x12, 0x00, 0xf0]);
     let output = command()
-        .args(["--load-address", "0x100", "--entry", "0x101", "--dump"])
+        .args(["--load-address", "0x100", "--entry", "0x102", "--dump"])
         .arg(&image.path)
         .output()
         .unwrap();
@@ -103,7 +103,7 @@ fn binary_images_use_little_endian_words_and_explicit_entry() {
     );
     assert!(output.stdout.is_empty());
     let state = String::from_utf8_lossy(&output.stderr);
-    assert!(state.contains("PC=0103"));
+    assert!(state.contains("PC=0106"));
     assert!(state.contains("r1=0001"));
     assert!(state.contains("r6=0000")); // CPU does not initialize ABI sp.
     assert!(state.contains("faulted=false"));
@@ -113,18 +113,18 @@ fn binary_images_use_little_endian_words_and_explicit_entry() {
 fn invalid_and_empty_images_and_faults_stop_the_runner() {
     for (extension, bytes, args, message) in [
         ("hex", &b"# empty"[..], vec![], "program image is empty"),
-        ("bin", &[0x00][..], vec![], "even number of bytes"),
+        ("bin", &[0x00][..], vec!["--entry", "1"], "entry byte address must be even"),
         (
             "hex",
             &b"F000 F000"[..],
-            vec!["--load-address", "0xffff"],
-            "exceeds the 64K-word",
+            vec!["--load-address", "0xfffe"],
+            "exceeds the 64-KiB",
         ),
         (
             "hex",
-            &b"9000 1241 F000"[..],
+            &b"B000 1241 F000"[..],
             vec!["--dump"],
-            "illegal instruction 9000 at word address 0000",
+            "illegal instruction B000 at byte address 0000",
         ),
     ] {
         let image = Image::new(extension, bytes);
@@ -133,10 +133,18 @@ fn invalid_and_empty_images_and_faults_stop_the_runner() {
         assert!(output.stdout.is_empty());
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(error.contains(message), "{error}");
-        if bytes.starts_with(b"9000") {
+        if bytes.starts_with(b"B000") {
             assert!(error.contains("PC=0000"));
             assert!(error.contains("r1=0000"));
             assert!(error.contains("faulted=true"));
         }
     }
+}
+
+#[test]
+fn odd_length_bin_can_end_in_byte_data() {
+    let image=Image::new("bin",&[0,0xf0,42]);
+    let output=command().args(["--dump"]).arg(&image.path).output().unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("PC=0002"));
 }

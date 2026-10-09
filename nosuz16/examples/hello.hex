@@ -18,4 +18,4 @@
 0246  # XOR r1, r1
 124A  # ADDI r1, 10 ('\n')
 3280
-F000  # HALT (N16-REF-1 SYSTEM instruction)
+F000  # HALT (N16-REF-2 SYSTEM instruction)

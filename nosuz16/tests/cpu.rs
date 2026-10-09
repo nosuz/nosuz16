@@ -39,7 +39,7 @@ fn reset_and_zero_register() {
 }
 
 #[test]
-fn v24_mov_expansions_copy_and_handle_overlapping_registers() {
+fn v25_mov_expansions_copy_and_handle_overlapping_registers() {
     // MOV r1, r2: the previous destination must not be added to the source.
     let mut cpu = Cpu::default();
     cpu.set_register(1, 5);
@@ -91,7 +91,7 @@ fn v24_mov_expansions_copy_and_handle_overlapping_registers() {
 }
 
 #[test]
-fn v24_cmp_expansion_compares_both_inputs_and_preserves_them() {
+fn v25_cmp_expansion_compares_both_inputs_and_preserves_them() {
     for (a, b, result, expected_flags) in [
         (
             7,
@@ -138,7 +138,7 @@ fn v24_cmp_expansion_compares_both_inputs_and_preserves_them() {
 }
 
 #[test]
-fn v24_nop_preserves_carry_chain_and_all_registers() {
+fn v25_nop_preserves_carry_chain_and_all_registers() {
     let mut cpu = Cpu::default();
     cpu.set_register(1, 0xffff);
     cpu.set_register(2, 1);
@@ -148,7 +148,7 @@ fn v24_nop_preserves_carry_chain_and_all_registers() {
     execute(&mut cpu, 0x7000); // NOP = JAL r0, 0
     assert_eq!(cpu.registers(), before.registers());
     assert_eq!(cpu.flags, before.flags);
-    assert_eq!(cpu.pc, before.pc.wrapping_add(1));
+    assert_eq!(cpu.pc, before.pc.wrapping_add(2));
     execute(&mut cpu, alu(2, 0, 2));
     assert_eq!((cpu.registers()[2], cpu.registers()[1]), (2, 0));
 }
@@ -264,17 +264,17 @@ fn shifts_are_one_bit_and_ignore_rs() {
 }
 
 #[test]
-fn load_store_word_offsets_and_address_wrap() {
+fn load_store_byte_offsets_and_address_wrap() {
     let mut cpu = Cpu::default();
     let mut memory = Memory::default();
     memory
         .load(
             0,
             &[
-                immediate(3, 1, 2, -1),
-                immediate(2, 3, 2, -1),
-                immediate(3, 1, 4, 31),
-                immediate(2, 5, 4, 31),
+                immediate(3, 1, 2, -2),
+                immediate(2, 3, 2, -2),
+                immediate(3, 1, 4, 30),
+                immediate(2, 5, 4, 30),
             ],
         )
         .unwrap();
@@ -289,8 +289,8 @@ fn load_store_word_offsets_and_address_wrap() {
     for _ in 0..4 {
         cpu.step(&mut memory).unwrap();
     }
-    assert_eq!(memory.peek(0xffff), 0xabcd);
-    assert_eq!(memory.peek(0x000f), 0xabcd);
+    assert_eq!(memory.peek(0xfffe), 0xabcd);
+    assert_eq!(memory.peek(0x000e), 0xabcd);
     assert_eq!(cpu.registers()[3], 0xabcd);
     assert_eq!(cpu.registers()[5], 0xabcd);
     assert_eq!(
@@ -308,11 +308,11 @@ fn load_store_word_offsets_and_address_wrap() {
 fn unified_memory_supports_self_modifying_code() {
     let mut cpu = Cpu::default();
     let mut memory = Memory::default();
-    memory.load(0, &[immediate(3, 1, 0, 1), 0]).unwrap();
+    memory.load(0, &[immediate(3, 1, 0, 2), 0]).unwrap();
     cpu.set_register(1, HALT);
     cpu.step(&mut memory).unwrap();
     assert_eq!(cpu.step(&mut memory), Ok(StepOutcome::Halted));
-    assert_eq!(cpu.pc, 2);
+    assert_eq!(cpu.pc, 4);
 }
 
 #[test]
@@ -338,7 +338,7 @@ fn all_branch_conditions_use_registers_and_preserve_flags() {
             v: true,
         };
         execute(&mut cpu, immediate(op, 1, 2, -32));
-        assert_eq!(cpu.pc, if taken { 69 } else { 101 });
+        assert_eq!(cpu.pc, if taken { 38 } else { 102 });
         assert_eq!(
             cpu.flags,
             Flags {
@@ -351,7 +351,7 @@ fn all_branch_conditions_use_registers_and_preserve_flags() {
     }
     let mut cpu = Cpu::default();
     execute(&mut cpu, immediate(4, 0, 0, 31));
-    assert_eq!(cpu.pc, 32);
+    assert_eq!(cpu.pc, 64);
 }
 
 #[test]
@@ -359,14 +359,14 @@ fn jal_signed_limits_links_and_wraparound() {
     let mut cpu = Cpu::default();
     cpu.pc = 100;
     execute(&mut cpu, jump(3, -256));
-    assert_eq!(cpu.registers()[3], 101);
-    assert_eq!(cpu.pc, 101u16.wrapping_sub(256));
-    cpu.pc = 0xffff;
+    assert_eq!(cpu.registers()[3], 102);
+    assert_eq!(cpu.pc, 102u16.wrapping_sub(512));
+    cpu.pc = 0xfffe;
     execute(&mut cpu, jump(7, 255));
     assert_eq!(cpu.registers()[7], 0);
-    assert_eq!(cpu.pc, 255);
+    assert_eq!(cpu.pc, 510);
     execute(&mut cpu, jump(0, -1));
-    assert_eq!(cpu.pc, 255);
+    assert_eq!(cpu.pc, 510);
     assert_eq!(cpu.registers()[0], 0);
 }
 
@@ -376,14 +376,14 @@ fn jalr_reads_source_before_link_write_and_ret_discards_link() {
     cpu.set_register(7, 100);
     execute(&mut cpu, immediate(8, 7, 7, -32));
     assert_eq!(cpu.pc, 68);
-    assert_eq!(cpu.registers()[7], 1);
+    assert_eq!(cpu.registers()[7], 2);
     execute(&mut cpu, immediate(8, 0, 7, 0));
-    assert_eq!(cpu.pc, 1);
+    assert_eq!(cpu.pc, 2);
     assert_eq!(cpu.registers()[0], 0);
     cpu.set_register(1, 0xffff);
     execute(&mut cpu, immediate(8, 2, 1, 31));
     assert_eq!(cpu.pc, 30);
-    assert_eq!(cpu.registers()[2], 2);
+    assert_eq!(cpu.registers()[2], 4);
 }
 
 #[test]
@@ -393,13 +393,13 @@ fn call_stack_and_return_program() {
         .load(
             0,
             &[
-                jump(7, 1), // call address 2, link address 1
+                jump(7, 1), // call byte address 4, link byte address 2
                 HALT,
-                immediate(1, 6, 6, -1),
+                immediate(1, 6, 6, -2),
                 immediate(3, 7, 6, 0),
                 immediate(1, 1, 1, 31),
                 immediate(2, 7, 6, 0),
-                immediate(1, 6, 6, 1),
+                immediate(1, 6, 6, 2),
                 immediate(8, 0, 7, 0),
             ],
         )
@@ -412,23 +412,23 @@ fn call_stack_and_return_program() {
     assert!(cpu.is_halted());
     assert_eq!(cpu.registers()[1], 31);
     assert_eq!(cpu.registers()[6], 0x8000);
-    assert_eq!(memory.peek(0x7fff), 1);
+    assert_eq!(memory.peek(0x7ffe), 2);
 }
 
 #[test]
 fn illegal_instructions_preserve_architectural_state_and_latch_fault() {
     for word in [
-        0x000a, 0x003f, 0x9000, 0xa000, 0xb000, 0xc000, 0xd000, 0xe000, 0xf001, 0xffff,
+        0x000a, 0x003f, 0xb000, 0xc000, 0xd000, 0xe000, 0xf001, 0xffff,
     ] {
         let mut cpu = Cpu::default();
-        cpu.pc = 123;
+        cpu.pc = 124;
         cpu.set_register(1, 42);
         let before = cpu.clone();
         let mut memory = Memory::default();
-        memory.load(123, &[word]).unwrap();
+        memory.load(124, &[word]).unwrap();
         let error = cpu.step(&mut memory).unwrap_err();
-        assert_eq!(error.pc, 123);
-        assert_eq!(error.instruction, word);
+        assert_eq!(error.pc, 124);
+        assert_eq!(error.instruction, Some(word));
         assert_eq!(cpu.pc, before.pc);
         assert_eq!(cpu.registers(), before.registers());
         assert_eq!(cpu.flags, before.flags);
@@ -443,9 +443,9 @@ fn illegal_instructions_preserve_architectural_state_and_latch_fault() {
 #[test]
 fn halt_is_sticky_and_fetch_wraps() {
     let mut cpu = Cpu::default();
-    cpu.pc = 0xffff;
+    cpu.pc = 0xfffe;
     let mut memory = Memory::default();
-    memory.load(0xffff, &[0]).unwrap();
+    memory.load(0xfffe, &[0]).unwrap();
     memory.load(0, &[HALT]).unwrap();
     cpu.step(&mut memory).unwrap();
     assert_eq!(cpu.pc, 0);
@@ -457,7 +457,7 @@ fn halt_is_sticky_and_fetch_wraps() {
 
 #[test]
 fn cpu_reset_clears_halt_and_fault_without_resetting_memory_or_devices() {
-    for instruction in [HALT, 0x9000] {
+    for instruction in [HALT, 0xb000] {
         let mut memory = Memory::default();
         memory.load(0, &[instruction]).unwrap();
         memory.write(0x1234, 0xbeef);
@@ -519,7 +519,7 @@ fn fault_does_not_repeat_a_device_fetch_and_requires_debugger_resume() {
     let mut cpu = Cpu::new(UART_DATA);
     let error = cpu.step(&mut memory).unwrap_err();
     assert_eq!(error.pc, UART_DATA);
-    assert_eq!(error.instruction, 0x003f);
+    assert_eq!(error.instruction, Some(0x003f));
     assert_eq!(cpu.pc, UART_DATA);
     for _ in 0..3 {
         assert_eq!(cpu.step(&mut memory), Err(error));
@@ -548,9 +548,9 @@ fn halted_cpu_never_accesses_bus_until_debugger_resume() {
             self.reads += 1;
             self.word
         }
-        fn write(&mut self, _: u16, _: u16) {
-            self.writes += 1;
-        }
+        fn write(&mut self, _: u16, _: u16) { self.writes += 1; }
+        fn read_byte(&mut self, address: u16) -> u8 { self.read(address) as u8 }
+        fn write_byte(&mut self, address: u16, value: u8) { self.write(address, value as u16); }
     }
     let mut bus = CountingBus {
         reads: 0,
@@ -576,12 +576,12 @@ fn halted_cpu_never_accesses_bus_until_debugger_resume() {
     bus.word = 0x7000; // flag-preserving NOP
     assert_eq!(cpu.step(&mut bus), Ok(StepOutcome::Executed));
     assert_eq!((bus.reads, bus.writes), (2, 0));
-    assert_eq!(cpu.pc, 2);
+    assert_eq!(cpu.pc, 4);
     assert_eq!(cpu.flags, before.flags);
 }
 
 #[test]
-fn overlapping_load_store_operands_and_store_zero_follow_v24() {
+fn overlapping_load_store_operands_and_store_zero_follow_v25() {
     let mut memory = Memory::default();
     memory
         .load(
@@ -642,20 +642,109 @@ fn loaders_validate_formats_and_boundaries_without_partial_loads() {
         parse_hex("0000 0x1234 ; ignored\nF000 // stop\n# end"),
         Ok(vec![0, 0x1234, HALT])
     );
-    assert_eq!(parse_binary(&[0x34, 0x12, 0, 0xf0]), Ok(vec![0x1234, HALT]));
-    assert_eq!(parse_binary(&[1]), Err(LoadError::OddBinaryLength));
+    assert_eq!(parse_binary(&[0x34, 0x12, 0, 0xf0]), Ok(vec![0x34, 0x12, 0, 0xf0]));
+    assert_eq!(parse_binary(&[1]), Ok(vec![1]));
     for token in ["10000", "-1", "0x", "+1", "123g"] {
         assert!(matches!(
             parse_hex(token),
             Err(LoadError::InvalidHex { line: 1, .. })
         ));
     }
-    assert_eq!(parse_binary(&vec![0; 131074]), Err(LoadError::TooLarge));
+    assert_eq!(parse_binary(&vec![0; 65537]), Err(LoadError::TooLarge));
     let mut memory = Memory::default();
-    memory.load(0xffff, &[123]).unwrap();
-    assert_eq!(memory.load(0xffff, &[1, 2]), Err(LoadError::TooLarge));
-    assert_eq!(memory.peek(0xffff), 123);
+    memory.load(0xfffe, &[123]).unwrap();
+    assert_eq!(memory.load(0xfffe, &[1, 2]), Err(LoadError::TooLarge));
+    assert_eq!(memory.peek(0xfffe), 123);
     memory.load(UART_DATA, &[0x1234]).unwrap();
     assert!(memory.take_uart_output().is_empty());
     assert_eq!(memory.peek(UART_DATA), 0x1234);
+}
+
+#[test]
+fn packed_bytes_preserve_neighbors_and_zero_extend_loads() {
+    let mut memory = Memory::default();
+    memory.write(0x1000, 0x1234);
+    assert_eq!(memory.peek_byte(0x1000), 0x34);
+    assert_eq!(memory.peek_byte(0x1001), 0x12);
+    memory.load(0, &[immediate(10, 1, 2, 1), immediate(9, 3, 2, 1)]).unwrap();
+    let mut cpu = Cpu::default();
+    cpu.set_register(1, 0xffab);
+    cpu.set_register(2, 0x1000);
+    cpu.flags.c = true;
+    cpu.step(&mut memory).unwrap();
+    cpu.step(&mut memory).unwrap();
+    assert_eq!(memory.peek(0x1000), 0xab34);
+    assert_eq!(cpu.registers()[3], 0x00ab);
+    assert!(cpu.flags.c);
+    assert_eq!(cpu.pc, 4);
+    memory.load_bytes(0xffff, &[0x80]).unwrap();
+    cpu.set_register(2, 0xffff);
+    memory.load(cpu.pc,&[immediate(9,1,2,0)]).unwrap();
+    cpu.step(&mut memory).unwrap();
+    assert_eq!(cpu.registers()[1], 0x80);
+}
+
+#[test]
+fn alignment_faults_are_precise_and_do_not_access_data_bus() {
+    struct RecordingBus { memory: Memory, reads: usize, writes: usize }
+    impl Bus for RecordingBus {
+        fn read(&mut self, a: u16) -> u16 { self.reads += 1; self.memory.read(a) }
+        fn write(&mut self, a: u16, v: u16) { self.writes += 1; self.memory.write(a,v); }
+        fn read_byte(&mut self, a: u16) -> u8 { self.reads += 1; self.memory.read_byte(a) }
+        fn write_byte(&mut self, a: u16, v: u8) { self.writes += 1; self.memory.write_byte(a,v); }
+    }
+    for opcode in [2,3,8] {
+        let mut bus = RecordingBus { memory: Memory::default(), reads: 0, writes: 0 };
+        let instruction = immediate(opcode,1,2,1);
+        bus.memory.load(0,&[instruction]).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.set_register(1,0x1234);cpu.set_register(2,0x1000);cpu.flags.c=true;
+        let before = cpu.clone();
+        let error = cpu.step(&mut bus).unwrap_err();
+        assert_eq!(error.instruction,Some(instruction));
+        assert_eq!(cpu.pc,before.pc);assert_eq!(cpu.registers(),before.registers());
+        assert_eq!(cpu.flags,before.flags);
+        assert_eq!((bus.reads,bus.writes),(1,0));
+        assert_eq!(cpu.step(&mut bus),Err(error));
+        assert_eq!((bus.reads,bus.writes),(1,0));
+        assert!(matches!(error.kind,nosuz16::FaultKind::Alignment { address: 0x1001, .. }));
+    }
+    let mut bus = RecordingBus { memory: Memory::default(), reads: 0, writes: 0 };
+    let mut cpu = Cpu::new(1);
+    let error = cpu.step(&mut bus).unwrap_err();
+    assert_eq!(error.instruction,None);
+    assert_eq!((bus.reads,bus.writes),(0,0));
+}
+
+#[test]
+fn uart_byte_lanes_and_video_byte_writes_follow_ref2() {
+    let mut memory = Memory::default();
+    memory.queue_uart_input([0,b'A']);
+    assert_eq!(memory.read_byte(UART_DATA+1),0);
+    assert_eq!(memory.read_byte(UART_STATUS),3);
+    assert_eq!(memory.read_byte(UART_STATUS+1),0);
+    assert_eq!(memory.read(UART_DATA),0);
+    assert_eq!(memory.read_byte(UART_STATUS),3);
+    assert_eq!(memory.read_byte(UART_DATA),b'A');
+    assert_eq!(memory.read(UART_STATUS),2);
+    memory.write_byte(UART_DATA+1,b'X');
+    memory.write_byte(UART_DATA,b'Y');
+    assert_eq!(memory.take_uart_output(),b"Y");
+    memory.write(VIDEO,0xab12);
+    memory.write_byte(VIDEO+1,0xcd);
+    assert_eq!(memory.read(VIDEO),0xcd12);
+    assert_eq!(memory.read_byte(VIDEO),0x12);
+    memory.load_bytes(VIDEO,&[0x34]).unwrap();
+    assert_eq!(memory.read(VIDEO),0xcd34);
+}
+
+#[test]
+fn odd_binary_data_and_last_byte_load_have_no_implicit_padding() {
+    assert_eq!(parse_binary(&[0,0xf0,42]),Ok(vec![0,0xf0,42]));
+    let mut memory=Memory::default();
+    memory.load_bytes(0xffff,&[42]).unwrap();
+    assert_eq!(memory.peek_byte(0xffff),42);
+    assert_eq!(memory.load_bytes(0xffff,&[1,2]),Err(LoadError::TooLarge));
+    assert_eq!(memory.peek_byte(0xffff),42);
+    assert_eq!(memory.load(1,&[HALT]),Err(LoadError::UnalignedHexOrigin));
 }
