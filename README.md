@@ -8,7 +8,7 @@ The experimental implementation and build/run instructions are in
 See the [Nosuz16 LLVM backend implementation plan](LLVM_BACKEND_PLAN.md) for
 the scope, implementation stages, memory-model decision, and validation criteria.
 
-The toolchain also includes an experimental C frontend with ordinary byte-per-word memory access:
+The toolchain also includes an experimental C frontend with ordinary packed byte-addressed memory access:
 
 ```bash
 ./llvm-nosuz16/scripts/compile-c.sh llvm-nosuz16/examples/hello.c /tmp/hello.hex

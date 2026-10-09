@@ -14,7 +14,8 @@ def main():
     run(['cargo', 'build', '--manifest-path', ROOT / 'nosuz16/Cargo.toml'])
     macros = run([CLANG, *FLAGS, '-E', '-dM', '-x', 'c', '-'], input='').stdout
     for definition in ('__CHAR_BIT__ 8', '__SIZEOF_INT__ 2', '__SIZEOF_POINTER__ 2',
-                       '__NOSUZ16__ 1', '__NOSUZ16_SCALAR_C__ 1'):
+                       '__NOSUZ16__ 1', '__NOSUZ16_SCALAR_C__ 1',
+                       '__NOSUZ16_BYTE_ADDRESSABLE__ 1', '__NOSUZ16_SPEC_VERSION__ 205'):
         assert '#define ' + definition in macros, definition
     print('PASS Clang target macros')
     with tempfile.TemporaryDirectory(prefix='nosuz16-clang-tests-') as temporary:
@@ -31,7 +32,7 @@ def main():
         start = directory / 'start.o'
         assemble(STARTUP, start)
 
-        def test(name, source, expected, output='', input_text=''):
+        def test(name, source, expected, output='', input_text='', extra_objects=()):
             c = directory / f'{name}.c'
             c.write_text(source)
             for level in (0, 1, 2):
@@ -40,7 +41,7 @@ def main():
                 # Both LLVM codegen levels and assembly/direct-object paths.
                 execute(directory, f'c-{name}-O{level}', ir.read_text(), expected,
                         runtime=runtime, startup=STARTUP, output=output, input_text=input_text,
-                        extra_objects=(console, memory))
+                        extra_objects=(console, memory, *extra_objects))
                 asm = directory / f'{name}-{level}.s'
                 object_file = directory / f'{name}-{level}.o'
                 assembled = directory / f'{name}-{level}-assembled.o'
@@ -49,7 +50,8 @@ def main():
                 run([CLANG, *FLAGS, f'-O{level}', '-c', c, '-o', object_file])
                 for obj in (object_file, assembled):
                     image = directory / 'program.bin'
-                    run(['python3', IMAGE, start, obj, runtime, console, memory, '-o', image])
+                    run(['python3', IMAGE, start, obj, runtime, console, memory,
+                         *extra_objects, '-o', image])
                     result = run([EMU, '--dump', '--max-steps', '1000000',
                                   '--uart-input', input_text, image])
                     assert result.stdout == output, result
@@ -132,14 +134,26 @@ int main(void) {
   unsigned int read = *p;
   *p = 255;
   return read + nosuz16_ldw(0x4000u);
-}''', 460)
+}''', 44236)
+        test('byte-io', '''#include "nosuz16.h"
+int main(void) {
+  nosuz16_stw(NOSUZ16_VIDEO_MODE,0x1234u);
+  nosuz16_stb(NOSUZ16_VIDEO_MODE+1u,0xabu);
+  (void)nosuz16_ldb(NOSUZ16_UART_TXRX+1u);
+  unsigned int ready=nosuz16_ldb(NOSUZ16_UART_STATUS);
+  unsigned int byte=nosuz16_ldb(NOSUZ16_UART_TXRX);
+  nosuz16_stb(NOSUZ16_UART_TXRX,byte);
+  return ready==3u && nosuz16_ldw(NOSUZ16_VIDEO_MODE)==0xab34u &&
+         nosuz16_ldb(NOSUZ16_VIDEO_MODE)==0x34u &&
+         nosuz16_ldb(NOSUZ16_VIDEO_MODE+1u)==0xabu;
+}''', 1, 'Q', 'Q')
         test('int-storage', '''#include "nosuz16.h"
 int main(void) {
   volatile unsigned int *p = (volatile unsigned int *)0x4000u;
   *p = 0xabcd;
   unsigned char *bytes = (unsigned char *)p;
   return (*p == 0xabcd && bytes[0] == 0xcd && bytes[1] == 0xab &&
-          nosuz16_ldw(0x4000u) == 0xcd && nosuz16_ldw(0x4001u) == 0xab &&
+          nosuz16_ldw(0x4000u) == 0xabcd &&
           (unsigned int)(p + 1) == 0x4002u);
 }''', 1)
         test('high-address', '''#include "nosuz16.h"
@@ -148,10 +162,33 @@ int main(void) {
   p[0] = 255; p[1] = 128;
   return p[0] + p[1] + ((unsigned int)(p + 1) == 0xe001u);
 }''', 384)
+        # Assembly observes all 16 ABI bits, avoiding truncation by a C callee.
+        char_abi = directory / 'char-abi.o'
+        assemble('''.text
+.globl inspect_char_args
+inspect_char_args:
+ add r1,r2
+ add r1,r3
+ ld r2,[r6+0]
+ add r1,r2
+ ret
+.globl inspect_char_return
+inspect_char_return:
+ addi r6,-2
+ st r7,[r6+0]
+ lcall negative_char
+ ld r7,[r6+0]
+ addi r6,2
+ ret
+''', char_abi)
         test('char-abi', '''__attribute__((noinline)) signed char byte(signed char v) { return v; }
 __attribute__((noinline)) unsigned char positive(unsigned char v) { return v; }
+__attribute__((noinline)) signed char negative_char(void) { volatile signed char v=-1; return v; }
+int inspect_char_args(signed char, unsigned char, _Bool, signed char);
+int inspect_char_return(void);
 int main(void) { volatile signed char a=-1; volatile unsigned char b=255;
- return byte(a) + positive(b); }''', 254)
+ return byte(a) + positive(b) + inspect_char_args(a,b,1,-128) + inspect_char_return();
+}''', 380, extra_objects=(char_abi,))
         test('pointer-abi', '''__attribute__((noinline)) int *select(int *a,int *b,int *c,int *d) { return d; }
 int main(void) { int a=1,b=2,c=3,d=41; int *p=select(&a,&b,&c,&d); ++*p;
  return *p + a + b + c; }''', 48)
@@ -181,8 +218,8 @@ int main(void) { values[0]=42; state.b+=2;
         test('pointer-storage', '''#include "nosuz16.h"
 int main(void) { volatile unsigned char **p=(volatile unsigned char **)0x4000u;
  *p=(volatile unsigned char *)0xe000u; **p=42;
- return **p + nosuz16_ldw(0x4000u) + nosuz16_ldw(0x4001u); }
-''', 266)
+ return **p + nosuz16_ldw(0x4000u); }
+''', 57386)
         test('large-stack', '''__attribute__((noinline)) int fill(char *p) { p[0]=3;p[127]=4;return p[0]+p[127]; }
 int main(void) { char buffer[128]; return fill(buffer); }''', 7)
         test('memory-intrinsics', '''#include "nosuz16.h"

@@ -1,10 +1,10 @@
 # Experimental Nosuz16 LLVM backend
 
-This backend targets [Nosuz16 v2.4](../Nosuz16_CPU_Spec.md) through
+This backend targets [Nosuz16 v2.5](../Nosuz16_CPU_Spec.md) through
 SelectionDAG and LLVM MC. It compiles a restricted LLVM IR subset to runnable
-word-addressed HEX/BIN images. Clang supports freestanding C with ordinary
-loads/stores, pointers, arrays, structures, and globals using one C byte per
-CPU word. Wider arithmetic and the full C library remain outside this subset.
+byte-addressed HEX/BIN images. Clang supports freestanding C with ordinary
+loads/stores, pointers, arrays, structures, and globals using packed eight-bit
+bytes. Wider arithmetic and the full C library remain outside this subset.
 
 ## Repository storage
 
@@ -65,37 +65,28 @@ ordinary executable-linking step do not support Nosuz16.
 
 ### C memory model
 
-Each C byte occupies one CPU word. Ordinary reads ignore the upper eight bits;
-ordinary writes clear them. `char` is eight-bit, `sizeof(char)` is 1, and
-`sizeof(int)` and `sizeof(void *)` are 2. Thus a character uses one physical
-word, while an int or stored pointer uses two, with the low byte first.
+Nosuz16 v2.5 has 16-bit byte addresses and 64 KiB of unified memory.
+Characters are packed: `sizeof(char)` is 1, while `sizeof(int)` and
+`sizeof(void *)` are 2. An aligned int or stored pointer uses one physical
+16-bit word. Memory is little-endian; `0x1234` occupies bytes `34 12`.
 
-| C object | Physical storage |
-| --- | --- |
-| `unsigned char c = 0xab` | `00AB` |
-| `unsigned int n = 0x1234` | `0034 0012` |
-| A pointer containing `0xe000` | `0000 00E0` |
+C pointer values match CPU byte addresses. `char *p + 1` advances one byte,
+and `int *p + 1` advances two. Character stores use STB and preserve the
+neighboring byte. LDB zero-extends; signed char conversions sign-extend.
+Aligned integer/pointer accesses use LD/ST. Packed structure fields at odd
+addresses use two LDB/STB operations and shifts. Alignment faults protect
+native word operations and instruction fetches at odd addresses.
 
-C pointers hold CPU word addresses. `char *p + 1` advances one word and
-`int *p + 1` advances two. Array strides, structure offsets, padding, and
-`sizeof` follow the usual byte-based C layout, with each byte mapped to a
-word. This covers 64K C bytes with 16-bit pointers, using 128 KiB of physical
-RAM. Code, stack, and I/O reduce the RAM available to program objects.
+`__NOSUZ16_BYTE_ADDRESSABLE__` and `__NOSUZ16_SPEC_VERSION__ == 205`
+identify this model. The old `__NOSUZ16_BYTE_PER_WORD__` macro is absent.
+The older `__NOSUZ16_SCALAR_C__` macro remains for compatibility.
 
-Signed char loads sign-extend the low byte after masking. Stored bytes always
-have zero upper bits. Object and pointer access works above address `0x8000`.
-Integer/pointer alignment is two C bytes (two words); packed structures can
-use alignment one. Null pointers contain zero. The
-`__NOSUZ16_BYTE_PER_WORD__` macro identifies this memory model; the older
-`__NOSUZ16_SCALAR_C__` macro is retained for compatibility.
-
-Compiler spills and ABI argument slots still hold native 16-bit values in
-one word. Addressable C locals reserve byte-per-word storage separately.
-Generated calls keep sp aligned to two words. Software helpers implement
-LLVM memcpy, memmove, and memset intrinsics, including overlapping memmove.
-`compile.sh` links [runtime/memory.c](runtime/memory.c) automatically.
-Rebuild previously compiled objects when adopting this profile and its stack
-alignment requirement.
+Stack objects, register spills, globals, and ABI slots use normal packed
+byte layouts. Calls require sp aligned to two bytes. LLVM memcpy, memmove,
+and memset use [runtime/memory.c](runtime/memory.c), linked automatically by
+`compile.sh`. Rebuild all v2.4 objects: address units, stack offsets, global
+layout, and relocations changed. The image builder rejects objects without
+the private v2.5 ELF flag.
 
 Dynamic stack allocation/VLAs, stack alignment above two C bytes, aggregate
 arguments/returns, wider scalar memory values/arithmetic, floating point,
@@ -122,8 +113,8 @@ int main(void) {
 }
 ```
 
-These functions map to the existing LLVM word-memory intrinsics. Their
-addresses are CPU word addresses, and unused reads remain observable.
+These functions map to LLVM word/byte memory intrinsics. Their
+addresses are CPU byte addresses, and unused reads remain observable.
 The header does not require a libc or a sysroot.
 
 ### UART character functions
@@ -195,12 +186,12 @@ arguments occupy consecutive words at the caller's sp. The caller reserves
 and releases outgoing argument space. The outgoing stack argument area is
 limited to 32766 LLVM bytes (16383 CPU words). Returns use r1. r4/r5 and sp are
 preserved; functions that overwrite r7 save their incoming link register.
-Flags are caller-saved. Incoming sp must be an even CPU word address.
+Flags are caller-saved. Incoming sp must be an even CPU byte address.
 
 The allocator uses r1-r4. r0, sp/r6, and lr/r7 are reserved; r5 is reserved
 for long branches. A branch-using function saves r5 as required by the ABI.
-Compiler stack-slot sizes/offsets are measured in LLVM bytes, checked for
-word alignment, and explicitly translated to CPU word offsets. Large stack
+Compiler stack-slot sizes/offsets use bytes directly. Native word slots
+require two-byte alignment; char object addresses may be odd. Large stack
 accesses temporarily adjust sp and restore it around the access, so they
 work without an additional free scratch register.
 
@@ -220,9 +211,9 @@ exceptions, and variadic/indirect calls are outside this release. Unsupported IR
 
 ### Word memory and I/O
 
-Ordinary pointer memory accesses use the byte-per-word representation above.
+Ordinary pointer memory accesses use the packed byte representation above.
 For full native words, including memory-mapped I/O, these intrinsics use an
-integer CPU **word address**:
+integer CPU **byte address**:
 
 ```llvm
 declare i16 @llvm.nosuz16.ldw(i16)
@@ -234,21 +225,21 @@ declare void @llvm.nosuz16.stw(i16, i16)
 call void @llvm.nosuz16.stw(i16 -256, i16 65)
 ```
 
-Both intrinsics conservatively have unknown memory effects and explicit side
+Both word intrinsics and the byte intrinsics `llvm.nosuz16.ldb/stb` conservatively have unknown memory effects and explicit side
 effects. Optimizers must retain discarded reads and preserve I/O ordering.
 This deliberately favors correctness over memory optimizations.
 
 ## Assembly and images
 
-`llvm-mc -triple=nosuz16` parses/encodes the full v2.4 instruction set,
+`llvm-mc -triple=nosuz16` parses/encodes the full v2.5 instruction set,
 including HALT and the corrected MOV, CMP, SUBI, and NOP aliases.
 `llvm-mc -triple=nosuz16 --disassemble` decodes native words. CMP syntax is
 `cmp rs1, rs2, tmp`; tmp must differ from r0 and both inputs.
 
-Native branch/jump numeric operands are signed word displacements relative
+Native branch/jump numeric operands are signed two-byte-scaled displacements relative
 to the next PC. Label operands resolve to target locations. Out-of-range
 native branches are rejected. Compiler output instead uses `brcc`, `ljmp`,
-and `lcall` pseudos that materialize absolute word addresses and use JALR.
+and `lcall` pseudos that materialize absolute byte addresses and use JALR.
 These fixed-size long sequences support all destinations in the address
 space without iterative relaxation. Constant loads currently always use a
 33-word construction; branch and constant-size optimization is future work.
@@ -256,12 +247,13 @@ space without iterative relaxation. Constant loads currently always use a
 changes flags. These pseudos must be accounted for when writing assembly.
 
 The image tool uses **private ELF32/EM_NONE transport objects** emitted by
-LLVM MC. Their four private relocation kinds are PC6, PC9, a relocated LI
-sequence, and a word-valued symbol reference. This is an implementation
+LLVM MC. They carry private ELF flag `0x205`; their five relocation kinds are
+PC6, PC9, a relocated LI sequence for data, a relocated LI sequence for aligned
+control targets, and a 16-bit byte-addressed symbol reference. This is an implementation
 transport between MC and the image builder, without a public ELF machine
 number, stable object ABI, or LLD support. Do not pass these objects to a
 system linker. MC section offsets and symbol addends use serialized byte
-units; final architectural addresses and displacements use words.
+units; architectural addresses use bytes; relative branches encode two-byte units.
 
 ```sh
 llvm-project/build-nosuz16/bin/llc -mtriple=nosuz16 -verify-machineinstrs \
@@ -274,14 +266,14 @@ python3 llvm-nosuz16/scripts/image.py /tmp/start.o /tmp/hello.o -o /tmp/hello.bi
 ```
 
 Executable sections precede data sections. Input order determines ordering
-within each group, so put startup first. Allocated sections contain aligned
-words; BSS is zero-filled. HEX contains one 16-bit word per line; BIN is
-little-endian. The image builder rejects unresolved/duplicate symbols,
+within each group, so put startup first. Executable sections require aligned instructions; data sections may contain
+individual bytes. BSS is zero-filled. HEX contains one 16-bit word per line
+and explicitly zero-pads a trailing byte; BIN preserves odd byte lengths. The image builder rejects unresolved/duplicate symbols,
 unaligned or oversized sections, range errors, and images reaching FF00h.
 It does not dynamically detect a stack colliding with the image; the caller
 must ensure sufficient RAM below FF00h for its program's call depth.
 
-`image.py --origin 0x100` places an image at that **word** address. Run it
+`image.py --origin 0x100` places an image at that **byte** address. Run it
 with the emulator's matching `--load-address 0x100`. Startup and relocated
 calls are resolved for the selected origin.
 
@@ -307,13 +299,14 @@ sentinels and checks callee preservation and restored sp. The suite also
 runs the emulator's existing Rust tests.
 
 Verified against the pinned LLVM checkout: twelve Clang/MC/CodeGen tests;
-32 IR cases with 128 guest runs; 31 C cases with 558 guest runs plus
+32 IR cases with 128 guest runs; 32 C cases with 576 guest runs plus
 a relocated global-pointer run;
-713 TargetParser tests passed with four host-platform skips; and all 31
+713 TargetParser tests passed with four host-platform skips; and all 36
 emulator tests passed. Both IR and C compile scripts produced and ran the
 `Hi` example successfully. C execution covers frontend O0/O1/O2, LLVM codegen
 O0/O2, direct Clang assembly/object emission, software arithmetic, calls with
-70 arguments, observable UART reads, byte/int/pointer storage, high addresses,
+70 arguments, full-register signed-character ABI checks, observable UART reads,
+packed byte/int/pointer storage, high addresses,
 array and structure access/copy, packed layouts, stack alignment, memory
 intrinsics, and runtime `%s` buffers. An empty UART input checks that `getc`
 keeps waiting. Unsupported C cases are checked for diagnostics.

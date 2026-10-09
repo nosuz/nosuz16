@@ -38,7 +38,7 @@ int __nosuz16_print_signed(int value) {
 int __nosuz16_print_string(unsigned int address) {
   int count = 0;
   unsigned int byte;
-  while ((byte = nosuz16_ldw(address++) & 0xffu) != 0u) {
+  while ((byte = nosuz16_ldb(address++) & 0xffu) != 0u) {
     putc(byte);
     ++count;
   }

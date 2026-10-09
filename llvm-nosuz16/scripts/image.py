@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve private Nosuz16 MC objects into a flat word-addressed HEX/BIN image."""
+"""Resolve private Nosuz16 MC objects into a flat byte-addressed HEX/BIN image."""
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +20,8 @@ def load_object(path):
     header = struct.unpack_from('<16sHHIIIIIHHHHHH', data)
     if header[1:3] != (1, 0):
         raise ValueError(f'{path}: expected private Nosuz16 ET_REL/EM_NONE object')
+    if header[7] != 0x205:
+        raise ValueError(f'{path}: expected Nosuz16 v2.5 object; rebuild older objects')
     offset, stride, count = header[6], header[11], header[12]
     if stride != 40 or offset + count * stride > len(data):
         raise ValueError(f'{path}: invalid section table')
@@ -27,7 +29,7 @@ def load_object(path):
     for index in range(count):
         fields = struct.unpack_from('<10I', data, offset + index * stride)
         name, kind, flags, address, start, size, link, info, align, entsize = fields
-        if flags & 2 and size > 0x20000:
+        if flags & 2 and size > 0x10000:
             raise ValueError(f'{path}: allocated section exceeds CPU address space')
         if kind != 8 and start + size > len(data):
             raise ValueError(f'{path}: truncated section')
@@ -59,13 +61,13 @@ def link(paths, origin):
                 for index, section in enumerate(obj.sections) if section['flags'] & 2 and section['size']]
     # All executable sections precede data. Input order determines startup order.
     segments.sort(key=lambda item: not bool(item[2]['flags'] & 4))
-    base = origin * 2
+    base = origin
     image = bytearray()
     for obj, index, section in segments:
         if section['kind'] not in (1, 8):
             raise ValueError(f'{obj.path}: unsupported allocated section')
-        alignment = max(2, section['align'])
-        if alignment & (alignment - 1) or section['size'] % 2:
+        alignment = max(1, section['align'])
+        if alignment & (alignment - 1) or (section['flags'] & 4 and section['size'] % 2):
             raise ValueError(f'{obj.path}: sections must contain aligned words')
         padding = (-base) % alignment
         image.extend(b'\x00' * padding)
@@ -74,9 +76,9 @@ def link(paths, origin):
         image.extend(section['data'])
         base += section['size']
     if not image:
-        raise ValueError('image contains no allocated words')
+        raise ValueError('image contains no allocated bytes')
     # The reference startup uses a descending stack below FF00; no image in I/O.
-    if base > 0xff00 * 2:
+    if base > 0xff00:
         raise ValueError('image reaches the reference I/O/stack boundary FF00')
     definitions = {}
     def symbol_address(obj, symbol):
@@ -117,34 +119,31 @@ def link(paths, origin):
                         raise ValueError(f"undefined symbol: {symbol['name']}")
                     defining_obj, symbol = definitions[symbol['name']]
                 value = symbol_address(defining_obj, symbol) + addend
-                if value % 2:
-                    raise ValueError('relocation target is not word aligned')
-                start = target['base'] - origin * 2 + offset
-                required = 66 if kind == 3 else 4 if kind == 5 else 2
+                if kind in (1, 2, 6) and value % 2:
+                    raise ValueError('branch target is not instruction aligned')
+                start = target['base'] - origin + offset
+                required = 66 if kind in (3, 6) else 2
                 if offset + required > target['size']:
                     raise ValueError('relocation exceeds its section')
                 word = struct.unpack_from('<H', image, start)[0]
                 if kind in (1, 2):
                     bits = 6 if kind == 1 else 9
-                    displacement = (value - (target['base'] + offset)) // 2 - 1
+                    delta = (value - (target['base'] + offset) - 2) & 65535
+                    displacement = (delta if delta < 32768 else delta - 65536) // 2
                     if not -(1 << (bits - 1)) <= displacement < (1 << (bits - 1)):
                         raise ValueError('branch relocation out of range')
                     struct.pack_into('<H', image, start, (word & ~((1 << bits) - 1)) | (displacement & ((1 << bits) - 1)))
-                elif kind == 3:
-                    value //= 2
+                elif kind in (3, 6):
                     if not 0 <= value <= 0xffff:
-                        raise ValueError('word address exceeds 16 bits')
+                        raise ValueError('byte address exceeds 16 bits')
                     for bit in range(16):
                         at = start + (2 + bit * 2) * 2
                         instruction = struct.unpack_from('<H', image, at)[0]
                         struct.pack_into('<H', image, at, (instruction & ~1) | ((value >> (15 - bit)) & 1))
                 elif kind == 4:
-                    struct.pack_into('<H', image, start, value // 2)
-                elif kind == 5:
-                    value //= 2
                     if not 0 <= value <= 0xffff:
-                        raise ValueError('word pointer exceeds 16 bits')
-                    struct.pack_into('<HH', image, start, value & 255, value >> 8)
+                        raise ValueError('byte pointer exceeds 16 bits')
+                    struct.pack_into('<H', image, start, value)
                 else:
                     raise ValueError(f'unsupported private relocation {kind}')
     return image
@@ -158,13 +157,15 @@ def main():
     parser.add_argument('--format', choices=['hex', 'bin'])
     args = parser.parse_args()
     try:
-        if not 0 <= args.origin < 0xff00:
-            raise ValueError('origin must be a RAM word address below FF00')
+        if not 0 <= args.origin < 0xff00 or args.origin & 1:
+            raise ValueError('origin must be an even RAM byte address below FF00')
         image = link(args.objects, args.origin)
         kind = args.format or ('bin' if args.output.suffix == '.bin' else 'hex')
         if kind == 'bin':
             args.output.write_bytes(image)
         else:
+            if len(image) % 2:
+                image.append(0)  # HEX word transport explicitly pads the final byte.
             words = struct.unpack(f'<{len(image) // 2}H', image)
             args.output.write_text(''.join(f'{word:04X}\n' for word in words))
     except (ValueError, IndexError, KeyError, UnicodeError, struct.error, OSError) as error:

@@ -1,16 +1,17 @@
 # Nosuz16 LLVM Backend Implementation Plan
 
-Implement an experimental LLVM backend for [Nosuz16 v2.4](Nosuz16_CPU_Spec.md)
+Implement an experimental LLVM backend for [Nosuz16 v2.5](Nosuz16_CPU_Spec.md)
 and validate its output with the [Rust emulator](nosuz16/README.md). The first
 deliverable is a working compiler pipeline for a restricted set of LLVM IR
-programs. The selected C memory model maps each eight-bit C byte to one
-CPU word, using 16-bit word-addressed pointers.
+programs. The selected v2.5 memory model packs eight-bit C bytes into
+16-bit physical words, using 16-bit byte-addressed pointers and 64 KiB of
+unified memory.
 
 ```text
 LLVM IR → Nosuz16 assembly → HEX or BIN image → Nosuz16 emulator
 ```
 
-The CPU instruction set remains unchanged. SelectionDAG will handle initial
+The backend implements the v2.5 instruction set, including LDB/STB. SelectionDAG handles initial
 instruction selection; GlobalISel is outside the first implementation.
 
 ## Implementation status — 2026-10-10
@@ -18,16 +19,16 @@ instruction selection; GlobalISel is outside the first implementation.
 The initial IR-to-image milestone is implemented in
 [llvm-nosuz16/](llvm-nosuz16/README.md), with the LLVM source delivered as a
 patch against the recorded revision. Stages 1–6 are implemented and tested;
-Stage 7 includes software `i16` arithmetic, UART output, and byte-per-word C
+Stage 7 includes software `i16` arithmetic, UART output, and packed byte C
 memory. Clang supports ordinary memory at O0/O1/O2, fixed scalar calls,
 pointers, arrays, global data, and structure fields/copies. Wider arithmetic,
 aggregate calling conventions, full libc, and a public ELF/LLD ABI remain
 future work.
 
-Validation passed: twelve Clang/LLVM MC/CodeGen tests, 31 C cases with
-558 guest executions plus one relocated global-pointer run, 32 IR cases at O0/O2
+Validation passed: twelve Clang/LLVM MC/CodeGen tests, 32 C cases with
+576 guest executions plus one relocated global-pointer run, 32 IR cases at O0/O2
 through assembly and direct-object paths (128 guest executions), 713 LLVM
-TargetParser unit tests (four platform-specific skips), and all 31 Rust
+TargetParser unit tests (four platform-specific skips), and all 36 Rust
 emulator tests. The example prints `Hi` and returns 42 with sp restored to
 FF00h. The patch applies cleanly to the recorded baseline.
 
@@ -51,40 +52,37 @@ build scripts, and execution-test scripts in a tracked `llvm-nosuz16/`
 directory in the main repository. Record the base revision with the patches
 so another checkout can reproduce the backend. The implementation is delivered in [llvm-nosuz16/](llvm-nosuz16/README.md).
 
-## Selected C memory model — 2026-10-10
+## Selected C memory model — v2.5
 
-The user selected one eight-bit C byte per CPU word. Ordinary C loads mask
-upper bits and stores clear them. LLVM byte offsets therefore correspond
-one-to-one to CPU word addresses. `char` stays eight-bit, `sizeof(int)` and
-`sizeof(void *)` stay 2, and a stored int or pointer uses two consecutive
-CPU words in little-endian byte order. This exposes 64K C bytes through
-16-bit pointers, without packing two C bytes into one word.
+The user selected 16-bit byte addressing with a 64 KiB unified address space.
+Two C bytes occupy one physical word. `char` stays eight-bit, `sizeof(int)`
+and `sizeof(void *)` stay 2, and aligned int/pointer values use one native
+word in little-endian order. LLVM byte offsets and CPU addresses now agree.
+The previous byte-per-word implementation and its expanded data/spill layout
+are superseded; old objects must be rebuilt.
 
-The implementation keeps the CPU ISA and physical word bus unchanged.
-Explicit `nosuz16_ldw/stw` operations still read and write full native words,
-including UART registers. Their conservative memory effects preserve
-observable reads and I/O ordering.
+CPU v2.5 adds LDB/STB opcodes 9/A. LDB zero-extends eight bits; STB preserves
+the neighboring byte. Word accesses, PC, SP, symbols, and pointers use byte
+addresses. Instructions advance PC by two, and word accesses/instruction
+fetch/JALR require even addresses. Relative branches retain two-byte-scaled
+immediates. UART STATUS moves to FF02, while DATA remains FF00.
 
-The memory lowering pass converts ordinary scalar loads/stores into masked
-word operations. GEP, pointer casts, comparisons, and array/structure offsets
-retain LLVM's ordinary byte-based layout. Global data expands each byte into
-a word; stored symbolic pointers use a private relocation that writes the
-word address as two byte-valued words. Static C allocas reserve twice their
-LLVM byte size so each logical byte has a physical word. Native allocator
-spill slots and ABI argument slots retain one full word per scalar value.
+The memory pass emits LD/ST for aligned integer and pointer accesses and
+LDB/STB for char or unaligned packed fields. Ordinary allocas, stack frames,
+and globals use LLVM byte sizes directly. Memory helpers use byte operations.
+Raw `nosuz16_ldw/stw` intrinsics access aligned words at byte addresses;
+`nosuz16_ldb/stb` provide explicit byte access with conservative side effects.
 
-Physical frame alignments are divided by two when deriving known pointer
-bits; otherwise LLVM could wrongly replace pointer addition with bitwise OR.
-Memory lowering runs after generic IR preparation to keep physical frame
-sizes out of ordinary C pointer optimization. Compiled calls require an
-even word-addressed sp. Default C int/pointer alignment is two words, while
-packed structure access can be unaligned.
+Symbols and relocation addends remain byte-valued throughout MC and image
+linking. Private ELF flag 0x205 distinguishes v2.5 objects, and old object
+flags are rejected. Data sections can contain odd byte lengths; BIN preserves
+them, while HEX transport explicitly zero-pads the last byte. The startup
+sets sp=FF00, an even byte address below the I/O region.
 
-The ABI retains fixed scalar calls. Integers up to 16 bits and pointers
-occupy native word argument registers/slots, regardless of their memory
-representation. Aggregate values/ABI, dynamic stack allocation, overaligned
-stack objects, wider arithmetic, atomics, and floating point remain separate
-extensions. LLVM memcpy/memmove/memset intrinsics use software helpers.
+The ABI retains fixed scalar calls. Integers up to 16 bits and pointers use
+one native word per register/stack argument, with stack slots at sp+0, sp+2,
+etc. Wider arithmetic, aggregate ABI, VLAs, atomics, and floating point remain
+separate extensions. LLVM memcpy/memmove/memset use software helpers.
 
 ## Initial scope
 
@@ -154,18 +152,18 @@ build successfully.
 ## Stage 3 Instruction encoding and assembly
 
 Implement MC instruction printing, parsing, encoding, decoding, and fixups.
-Describe all 18 core instructions and the N16-REF-1 HALT encoding. Emit
+Describe all 20 core instructions and the N16-REF-2 HALT encoding. Emit
 canonical unused fields while accepting the legal alternate encodings
-specified by v2.4.
+specified by v2.5.
 
 Validate immediate and register ranges. Implement the corrected MOV, CMP,
 NOP, and SUBI aliases, including the MOV self-copy case, CMP scratch-register
 constraints, and SUBI's -31 to 32 input range. Numeric branch operands are
-word offsets; label operands are target addresses.
+two-byte-scaled offsets; label operands are byte addresses.
 
 Resolve relative offsets from the incremented PC. At the MC/tool boundary,
-handle serialized instruction sizes in bytes and architectural offsets in
-words explicitly. Reject offsets that cannot be encoded without relaxation.
+handle serialized instruction sizes and addresses in bytes, scaling relative
+branch offsets by two. Reject offsets that cannot be encoded without relaxation.
 
 **Completion:** encoding and decoding tests cover every instruction, signed
 immediate boundaries, PC-relative offsets, reserved encodings, and alias
@@ -196,7 +194,7 @@ and loops. Unsupported IR receives a diagnostic rather than invalid code.
 ## Stage 5 Stack frames and calling convention
 
 Implement copies, spills, reloads, frame-index elimination, prologues,
-epilogues, call lowering, and return lowering. Follow the v2.4 ABI:
+epilogues, call lowering, and return lowering. Follow the v2.5 ABI:
 
 - r1-r3 carry the first three word arguments.
 - Additional word arguments occupy the caller's stack and are cleaned up by
@@ -223,7 +221,7 @@ must continue to leave sp at zero.
 
 Provide a flat-image assembly and symbol-resolution path, backed by LLVM MC,
 that emits the emulator's HEX and little-endian BIN formats. Resolve code
-and data symbols in CPU word addresses. Define section placement and reject
+and data symbols in CPU byte addresses. Define section placement and reject
 images that overlap reserved I/O or exceed the address space.
 
 The first implementation uses fixed-size long branch/call sequences after
@@ -248,7 +246,7 @@ Add runtime helpers for multiplication, division, remainder, and wider
 integer operations. Extend legalization and define the ABI for any additional
 multiword argument types. Test carry and borrow chains used by wider values.
 
-The byte-per-word memory model is selected and implemented for pointers,
+The packed byte memory model is selected and implemented for pointers,
 arrays, structure fields, global data, and static local objects. Keep language
 layout, pointer conversions, null representation, and volatile I/O consistent
 when adding wider values or aggregate calling conventions.
@@ -290,7 +288,7 @@ requires wider arithmetic, aggregate ABI, and runtime work.
 
 ## References
 
-- [Nosuz16 CPU specification v2.4](Nosuz16_CPU_Spec.md)
+- [Nosuz16 CPU specification v2.5](Nosuz16_CPU_Spec.md)
 - [Nosuz16 Rust emulator](nosuz16/README.md)
 - [LLVM backend development guide](https://llvm.org/docs/WritingAnLLVMBackend.html)
 - [LLVM CMake build options](https://llvm.org/docs/CMake.html)

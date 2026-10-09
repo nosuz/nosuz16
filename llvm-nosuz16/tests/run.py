@@ -89,15 +89,17 @@ bne r1,r2,31
 blt r1,r2,-1
 jal r7,-256
 jalr r7,r7,31
+ldb r1,[r2-1]
+stb r3,[r4+1]
 halt
 '''
         native = directory / 'native.o'
         assemble(source, native)
         binary = directory / 'native.bin'
         run(['python3', IMAGE, native, '-o', binary])
-        words = struct.unpack('<19H', binary.read_bytes())
+        words = struct.unpack('<21H', binary.read_bytes())
         assert words == (0x280,0x281,0x282,0x283,0x284,0x285,0x286,0x207,0x208,0x209,
-                         0x1260,0x229f,0x32a0,0x42a0,0x529f,0x62bf,0x7f00,0x8fdf,0xf000), words
+                         0x1260,0x229f,0x32a0,0x42a0,0x529f,0x62bf,0x7f00,0x8fdf,0x92bf,0xa701,0xf000), words
         decoded = run([TOOLS / 'llvm-mc', '-triple=nosuz16', '--disassemble'],
                       input='\n'.join(f'0x{word & 255:02x} 0x{word >> 8:02x}' for word in words))
         assert 'addc' in decoded.stdout and 'halt' in decoded.stdout, decoded.stdout
@@ -108,25 +110,44 @@ halt
             0x1480,0x246,0x280,0x6c6,0x640,0x681,0x7000,0x1260,0x81c0)
         print('PASS alias encodings')
         for invalid in ('addi r1,32','addi r1,-33','jal r1,256','jal r1,-257',
-                        'subi r1,-32','cmp r1,r2,r0','cmp r1,r2,r1','add r8,r1','ld r1,[r2+32]'):
+                        'subi r1,-32','cmp r1,r2,r0','cmp r1,r2,r1','add r8,r1','ld r1,[r2+32]','ljmp 1','lcall 3'):
             run([TOOLS / 'llvm-mc', '-triple=nosuz16', '-filetype=obj', '-o', native], input=invalid+'\n', success=False)
-        bad = run([TOOLS / 'llvm-mc', '-triple=nosuz16', '--disassemble'], input='0x00 0x90\n0x01 0xf0\n0x0a 0x00\n')
+        bad = run([TOOLS / 'llvm-mc', '-triple=nosuz16', '--disassemble'], input='0x00 0xb0\n0x01 0xf0\n0x0a 0x00\n')
         assert bad.stderr.count('invalid instruction encoding') == 3, bad.stderr
         print('PASS invalid encodings and assembly operands')
-        # Link symbolic code/data at a nonzero CPU word address.
+        # Link symbolic code/data at a nonzero CPU byte address.
         assemble('.text\n.globl _start\n_start:\nli r6,65280\nlcall main\nhalt\nmain:\nli r1,42\nret\n.data\n.short main\n',native)
         run(['python3',IMAGE,native,'--origin','0x100','-o',binary])
         relocated=run([EMU,'--dump','--load-address','0x100',binary])
         assert 'r1=002A' in relocated.stderr and 'r6=FF00' in relocated.stderr,relocated.stderr
-        assert struct.unpack_from('<H',binary.read_bytes(),len(binary.read_bytes())-2)[0]==0x144
+        assert struct.unpack_from('<H',binary.read_bytes(),len(binary.read_bytes())-2)[0]==0x188
+        old = directory/'old.o'
+        data=bytearray(native.read_bytes());struct.pack_into('<I',data,36,0)
+        old.write_bytes(data)
+        assert 'rebuild older objects' in run(['python3',IMAGE,old,'-o',binary],success=False).stderr
+        # A packed character pointer may be odd; a code target may not.
+        assemble('.text\nli r1,text+1\nhalt\n.data\ntext: .byte 65,66,0\n',native)
+        run(['python3',IMAGE,native,'-o',binary])
+        assert len(binary.read_bytes())%2==1
+        assemble('.text\nlcall target+1\ntarget: halt\n',native)
+        assert 'instruction aligned' in run(['python3',IMAGE,native,'-o',binary],success=False).stderr
+        # Short branches crossing FFFF/0000 use modulo-65536 byte distances.
+        assemble('.text\nzero: .space 65534\njal r7,zero\n',native)
+        sys_path=ROOT/'llvm-nosuz16/scripts'
+        import sys
+        sys.path.insert(0,str(sys_path))
+        from image import load_object
+        parsed=load_object(native)
+        code=next(x['data'] for x in parsed.sections if x['flags']&4)
+        assert struct.unpack_from('<H',code,65534)[0]==0x7e00
         assemble('beq r0,r0,forward\nnop\nforward: bne r0,r0,forward\n',native)
         run(['python3',IMAGE,native,'-o',binary])
         assert struct.unpack('<3H',binary.read_bytes())==(0x4001,0x7000,0x503f)
         assemble('.text\n.byte 0\n',native)
         assert 'aligned words' in run(['python3',IMAGE,native,'-o',binary],success=False).stderr
-        assemble('.text\n.space 130562\n',native)
+        assemble('.text\n.space 65282\n',native)
         assert 'boundary' in run(['python3',IMAGE,native,'-o',binary],success=False).stderr
-        print('PASS MC fixups, relocated word symbols, and image bounds')
+        print('PASS MC fixups, relocated byte symbols, and image bounds')
         if options.mc_only:
             return
         def test(name, ir, expected, **kwargs):
@@ -204,7 +225,7 @@ define i16 @main() { %v=call i16 @sum(i16 100) ret i16 %v }''', 4950)
         mmio_optimized=directory/'mmio-optimized.ll'
         run([TOOLS/'opt','-mtriple=nosuz16','-passes=default<O2>','-S',mmio_source,'-o',mmio_optimized])
         test('optimized-word-io',mmio_optimized.read_text(),-1234+66,output='B',input_text='AB')
-        # More than three args plus a frame exceeding the six-bit word offset.
+        # More than three args plus a frame exceeding the six-bit byte offset.
         count=70
         args=','.join(f'i16 %a{i}' for i in range(count))
         lines=[];previous='%a0'
@@ -213,8 +234,8 @@ define i16 @main() { %v=call i16 @sum(i16 100) ret i16 %v }''', 4950)
         helper='define i16 @many('+args+') {\n'+'\n'.join(lines)+f'\nret i16 {previous}\n}}\n'
         main='define i16 @main() { %v=call i16 @many('+','.join(f'i16 {i+1}' for i in range(count))+') ret i16 %v }'
         test('large-frame-call', helper+main, count*(count+1)//2)
-        stores=[f'call void @llvm.nosuz16.stw(i16 {16384+i},i16 {i+1})' for i in range(20)]
-        loads=[f'%v{i}=call i16 @llvm.nosuz16.ldw(i16 {16384+i})' for i in range(20)]
+        stores=[f'call void @llvm.nosuz16.stw(i16 {16384+2*i},i16 {i+1})' for i in range(20)]
+        loads=[f'%v{i}=call i16 @llvm.nosuz16.ldw(i16 {16384+2*i})' for i in range(20)]
         sums=[];previous='%v0'
         for i in range(1,20):
             sums.append(f'%s{i}=add i16 {previous},%v{i}');previous=f'%s{i}'

@@ -1,4 +1,4 @@
-; Explicit word addresses are i16 integers, independent of LLVM byte pointers.
+; Word accesses use aligned i16 byte addresses, like ordinary LLVM pointers.
 target triple = "nosuz16"
 
 declare void @llvm.nosuz16.stw(i16, i16)
