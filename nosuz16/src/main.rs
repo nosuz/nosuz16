@@ -1,13 +1,13 @@
 use nosuz16::{Cpu, Memory, StepOutcome, parse_binary, parse_hex};
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 const HELP: &str = "Usage: nosuz16 [OPTIONS] PROGRAM
 
-Run a Nosuz16 v2.5 machine-code image. UART output is written to stdout.
+Run a Nosuz16 v2.5 machine-code image. UART is connected to stdin/stdout.
 
 Options:
   --format hex|bin       Image format (default: bin for .bin, otherwise hex)
@@ -164,12 +164,42 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut memory = Memory::default();
     memory.load_bytes(options.origin, &image)?;
     memory.queue_uart_input(options.input.bytes());
+    let input_receiver = {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut input = io::stdin().lock();
+            let mut buffer = [0u8; 256];
+            loop {
+                match input.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        if sender.send(Ok(buffer[..count].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        break;
+                    }
+                }
+            }
+        });
+        receiver
+    };
+    let mut input_poll = 0u16;
     let mut cpu = Cpu::new(entry);
     let mut remaining_steps = options.max_steps;
     let mut output = io::stdout().lock();
     let mut halted = false;
     let mut execution_error = None;
     loop {
+        if input_poll == 0 {
+            for input in input_receiver.try_iter() {
+                memory.queue_uart_input(input?);
+            }
+        }
+        input_poll = (input_poll + 1) & 1023;
         if let Some(remaining) = remaining_steps.as_mut() {
             if *remaining == 0 {
                 break;

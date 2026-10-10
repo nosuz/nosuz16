@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Image {
@@ -49,6 +50,32 @@ fn hello_program_outputs_uart_and_halts() {
     let state = String::from_utf8(output.stderr).unwrap();
     assert!(state.contains("PC=0028"));
     assert!(state.contains("halted=true"));
+}
+
+#[test]
+fn stdin_supplies_live_uart_bytes() {
+    // r2=FF00; poll RX_READY at FF02, read one byte, transmit it, halt.
+    let image = Image::new(
+        "hex",
+        b"14BF 0407 0407 0407 0407 0407 0407 0407 0407 \
+          1901 2682 0704 463D 2280 3280 F000",
+    );
+    let mut child = command()
+        .arg(&image.path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The reader must deliver a raw byte without needing a newline.
+    child.stdin.take().unwrap().write_all(&[0x80]).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, [0x80]);
 }
 
 #[test]

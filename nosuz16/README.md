@@ -28,6 +28,13 @@ instructions, alignment faults, invalid images, and instruction-limit exhaustion
 nonzero status. Execution is unlimited unless `--max-steps COUNT` is supplied.
 An explicit limit counts every instruction, including HALT.
 
+UART input always comes from stdin, including interactive games. Terminal
+input normally arrives after pressing Enter; piped input also works. Any
+`--uart-input` bytes are queued first, followed by bytes read from stdin.
+Closing stdin stops the host reader but does not halt the emulated CPU or
+send an EOF byte to the UART. Interactive programs should provide a quit
+command (the Othello demo uses `q` followed by Enter).
+
 Hex images contain whitespace-separated hexadecimal words, with optional
 `0x` prefixes and `#`, `;`, or `//` line comments. For example:
 

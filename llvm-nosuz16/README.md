@@ -155,6 +155,36 @@ saved sample with an independent floating-point reference. It uses the
 installed emulator, the local release build, or `NOSUZ16_EMULATOR` if set.
 The test also requires completion within 200 million guest instructions.
 
+## Othello demo
+
+[examples/othello.c](examples/othello.c) implements an 8×8 human-versus-CPU
+game over UART. X always moves first; whoever is selected to start controls
+X, and the other player controls O. The CPU uses a two-ply search and a positional evaluation that favors corners and penalizes nearby
+squares. In the last eight empty squares, disc counts also influence its
+evaluation. Ties are broken in row order. It is a small opponent rather
+than a tournament-strength engine.
+
+```sh
+nosuz16-cc /workspaces/llvm-nosuz16/examples/othello.c /tmp/othello.bin
+nosuz16 /tmp/othello.bin
+```
+
+Use the updated emulator, or run the workspace version with
+`cargo run --release --manifest-path nosuz16/Cargo.toml -- /tmp/othello.bin`.
+Choose `1` to play first as X or `2` for CPU first as X (you play O), then Enter.
+Enter moves like `d3` followed by Enter, or `q` to quit. Uppercase columns
+and CRLF input are accepted. The game validates captures in all eight
+directions, handles forced passes, and reports the final score and winner.
+The image is about 39 KiB; shared helpers and disabled loop unrolling leave
+room for the board and search stack in the 64 KiB address space.
+
+Run `python3 llvm-nosuz16/tests/othello.py` to check complete games with
+each starting player against independent Python board rules and search,
+including every displayed
+board, forced passes, and the final score. It also checks malformed moves,
+CRLF, quitting, and live stdin. Set `NOSUZ16_EMULATOR` to the updated local
+emulator if the installed version predates default stdin UART input.
+
 ## Clang C frontend
 
 The build includes `clang` with a Nosuz16 target. Compile freestanding C at

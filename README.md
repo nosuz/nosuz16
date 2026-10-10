@@ -98,6 +98,35 @@ nosuz16 /tmp/mandelbrot.bin
 Execution has no step limit by default. Add `--max-steps COUNT` when you
 want to bound a run, for example `nosuz16 --max-steps 500000000 /tmp/mandelbrot.bin`.
 
+### Othello: human versus CPU
+
+Play on an ASCII 8×8 board. X always moves first.
+Choose `1` to play first as `X`, or `2` for the CPU to play first as `X`
+while you play `O`, then Enter.
+Enter a column and row such as `d3`, then press Enter. Enter `q` to quit.
+Invalid moves are rejected, and a player with no legal move passes
+automatically. The game ends when neither player can move and reports the
+disc counts and winner. The CPU searches its move and your possible reply,
+using corner and edge weights to choose a move.
+
+```bash
+nosuz16-cc llvm-nosuz16/examples/othello.c /tmp/othello.bin
+nosuz16 /tmp/othello.bin
+```
+
+The emulator always connects UART to stdin/stdout. To play immediately from the
+workspace without rebuilding the container:
+
+```bash
+cargo run --release --manifest-path nosuz16/Cargo.toml -- /tmp/othello.bin
+```
+
+For a scripted opening followed by quitting:
+
+```bash
+nosuz16 --uart-input $'1\nd3\nq\n' /tmp/othello.bin
+```
+
 ### LLVM IR example
 
 Compile the handwritten IR version of Hello world with `nosuz16-ir`:
