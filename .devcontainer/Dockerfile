@@ -55,9 +55,11 @@ WORKDIR /src/emulator
 # Copy Cargo project
 COPY nosuz16/Cargo.toml nosuz16/Cargo.lock ./
 COPY nosuz16/src/ ./src/
+COPY nosuz16/tests/ ./tests/
+COPY nosuz16/examples/ ./examples/
 
-# Build emulator
-RUN cargo build --release
+# Test fixtures include examples/hello.hex.
+RUN cargo test --locked && cargo build --release --locked
 
 # Stage 3: Development environment
 # Software development needs installed tools, headers, and runtime sources.
@@ -163,6 +165,20 @@ USER ubuntu
 ARG CLAUDE_BUST
 RUN echo "CLAUDE_BUST=$CLAUDE_BUST" \
     && curl -fsSL https://claude.ai/install.sh | bash
+
+# # install Rust
+# USER ubuntu
+
+# ENV CARGO_HOME=/home/ubuntu/.cargo
+# ENV RUSTUP_HOME=/home/ubuntu/.rustup
+# ENV PATH="${CARGO_HOME}/bin:${PATH}"
+
+# RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+#     | sh -s -- \
+#     -y \
+#     --no-modify-path \
+#     --profile minimal \
+#     --default-toolchain 1.85.1
 
 USER root
 

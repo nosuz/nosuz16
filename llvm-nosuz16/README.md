@@ -46,7 +46,7 @@ tests are carried in [the patch](patches/0001-nosuz16-backend.patch).
 
 The [.devcontainer/Dockerfile](../.devcontainer/Dockerfile) has three stages. `builder` fetches the
 revision in `LLVM_BASE_REVISION`, applies the backend patch, builds LLVM/Clang,
-and installs selected components. `emulator-builder` builds the Rust emulator.
+and installs selected components. `emulator-builder` builds and tests the Rust emulator.
 The final `dev` stage contains the tools for developing Nosuz16 programs:
 
 | Command | Purpose |
@@ -121,7 +121,7 @@ so a demo added after the image was built is available immediately:
 
 ```sh
 nosuz16-cc /workspaces/llvm-nosuz16/examples/mandelbrot.c /tmp/mandelbrot.bin
-nosuz16 --max-steps 500000000 /tmp/mandelbrot.bin
+nosuz16 /tmp/mandelbrot.bin
 ```
 
 From a source checkout with the compiler built:
@@ -129,11 +129,12 @@ From a source checkout with the compiler built:
 ```sh
 ./llvm-nosuz16/scripts/compile-c.sh llvm-nosuz16/examples/mandelbrot.c /tmp/mandelbrot.bin
 cargo run --release --manifest-path nosuz16/Cargo.toml -- \
-  --max-steps 500000000 /tmp/mandelbrot.bin
+  /tmp/mandelbrot.bin
 ```
 
-The increased instruction limit allows for software multiplication. The demo
-returns zero and emits 25 rows of 79 ASCII characters, each with a newline.
+The emulator runs without a step limit by default; use `--max-steps COUNT`
+to bound a run. The demo returns zero and emits 25 rows of 79 ASCII
+characters, each with a newline.
 
 Run `python3 llvm-nosuz16/tests/mandelbrot.py` to compare every pixel and the
 saved sample with an independent floating-point reference. It uses the

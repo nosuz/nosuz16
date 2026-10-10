@@ -25,7 +25,8 @@ cargo clippy --all-targets -- -D warnings
 Use `--help` for options. UART bytes go to stdout; trace, final state, and
 errors go to stderr. Successful HALT returns exit status 0. Illegal
 instructions, alignment faults, invalid images, and instruction-limit exhaustion return a
-nonzero status. The default instruction limit is 1,000,000, including HALT.
+nonzero status. Execution is unlimited unless `--max-steps COUNT` is supplied.
+An explicit limit counts every instruction, including HALT.
 
 Hex images contain whitespace-separated hexadecimal words, with optional
 `0x` prefixes and `#`, `;`, or `//` line comments. For example:

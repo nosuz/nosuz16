@@ -72,10 +72,122 @@ fn step_limit_reports_failure() {
 }
 
 #[test]
+fn execution_without_step_limit_can_exceed_one_million_instructions() {
+    // Eight passes of a 65535-count inner loop: 1,048,586 instructions.
+    let image = Image::new("hex", b"1208 143F 14BF 543E 127F 523B F000");
+    let output = command()
+        .arg("--dump")
+        .arg(&image.path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = String::from_utf8_lossy(&output.stderr);
+    assert!(state.contains("PC=000E"));
+    assert!(state.contains("r1=0000") && state.contains("r2=0000"));
+    assert!(state.contains("halted=true faulted=false"));
+
+    let limited = command()
+        .args(["--max-steps", "1000000"])
+        .arg(&image.path)
+        .output()
+        .unwrap();
+    assert!(!limited.status.success());
+    assert!(
+        String::from_utf8_lossy(&limited.stderr).contains("instruction limit (1000000) reached")
+    );
+
+    // Check both sides of the exact limit, including the HALT instruction.
+    for (limit, succeeds, pc) in [
+        ("1048585", false, "PC=000C"),
+        ("1048586", true, "PC=000E"),
+        ("1048587", true, "PC=000E"),
+    ] {
+        let output = command()
+            .args(["--max-steps", limit, "--dump"])
+            .arg(&image.path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), succeeds);
+        assert!(String::from_utf8_lossy(&output.stderr).contains(pc));
+    }
+}
+
+#[test]
+fn explicit_step_limit_stops_an_infinite_loop_at_the_exact_count() {
+    // JAL r0,-1 jumps back to itself without changing flags or registers.
+    let image = Image::new("hex", b"71FF");
+    for limit in ["3", "0x3"] {
+        let output = command()
+            .args(["--max-steps", limit, "--trace", "--dump"])
+            .arg(&image.path)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let state = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(state.lines().filter(|line| line.starts_with("PC=")).count(), 4);
+        assert!(state.contains("instruction limit (3) reached at PC=0000"));
+        assert!(!state.contains("halted=true") && !state.contains("faulted=true"));
+    }
+}
+
+#[test]
+fn maximum_u64_step_limit_does_not_overflow() {
+    let image = Image::new("hex", b"F000");
+    let output = command()
+        .args(["--max-steps", "18446744073709551615"])
+        .arg(&image.path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+}
+
+#[test]
+fn invalid_step_limits_are_rejected() {
+    for (value, message) in [
+        ("0", "--max-steps must be positive"),
+        ("-1", "invalid number"),
+        ("abc", "invalid number"),
+        ("18446744073709551616", "invalid number"),
+    ] {
+        let output = command()
+            .args(["--max-steps", value, &hello_path()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+    }
+    let missing = command().arg("--max-steps").output().unwrap();
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--max-steps requires a value"));
+}
+
+#[test]
+fn halt_at_the_explicit_step_limit_succeeds() {
+    let image = Image::new("hex", b"F000");
+    let output = command()
+        .args(["--max-steps", "1", "--dump"])
+        .arg(&image.path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("halted=true faulted=false"));
+}
+
+#[test]
 fn help_and_invalid_options() {
     let output = command().arg("--help").output().unwrap();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: nosuz16"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("default: unlimited"));
     for args in [
         vec!["--entry", "65536"],
         vec!["--format", "elf"],

@@ -13,7 +13,7 @@ Options:
   --format hex|bin       Image format (default: bin for .bin, otherwise hex)
   --load-address ADDR    First byte address (default: 0)
   --entry ADDR           Initial PC (default: load address)
-  --max-steps COUNT     Instruction limit (default: 1000000)
+  --max-steps COUNT     Instruction limit (default: unlimited)
   --uart-input TEXT     Queue UTF-8 bytes for UART reads
   --trace               Print CPU state before each step to stderr
   --dump                Print final CPU state to stderr
@@ -165,11 +165,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     memory.load_bytes(options.origin, &image)?;
     memory.queue_uart_input(options.input.bytes());
     let mut cpu = Cpu::new(entry);
-    let max_steps = options.max_steps.unwrap_or(1_000_000);
+    let mut remaining_steps = options.max_steps;
     let mut output = io::stdout().lock();
     let mut halted = false;
     let mut execution_error = None;
-    for _ in 0..max_steps {
+    loop {
+        if let Some(remaining) = remaining_steps.as_mut() {
+            if *remaining == 0 {
+                break;
+            }
+            *remaining -= 1;
+        }
         if options.trace {
             print_state(&cpu);
         }
@@ -197,12 +203,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(error) = execution_error {
         return Err(error.into());
     }
-    if !halted {
-        return Err(format!(
-            "instruction limit ({max_steps}) reached at PC={:04X}",
-            cpu.pc
-        )
-        .into());
+    if let Some(max_steps) = options.max_steps {
+        if !halted {
+            return Err(format!(
+                "instruction limit ({max_steps}) reached at PC={:04X}",
+                cpu.pc
+            )
+            .into());
+        }
     }
     Ok(())
 }
