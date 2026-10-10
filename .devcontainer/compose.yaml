@@ -3,8 +3,9 @@ services:
     build:
       context: ..
       dockerfile: .devcontainer/Dockerfile
-      # target: ${TARGET:-runtime}
+      target: dev
       args:
+        LLVM_BUILD_JOBS: ${LLVM_BUILD_JOBS:-2}
         CODEX_BUST: ${CODEX_BUST:-0}
         CLAUDE_BUST: ${CLAUDE_BUST:-0}
     command: sleep infinity

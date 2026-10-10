@@ -42,6 +42,65 @@ expects `main` to take no arguments and return an `i16` or void.
 inside the ignored LLVM checkout. The backend source and LLVM regression
 tests are carried in [the patch](patches/0001-nosuz16-backend.patch).
 
+## Docker SDK
+
+The [.devcontainer/Dockerfile](../.devcontainer/Dockerfile) has three stages. `builder` fetches the
+revision in `LLVM_BASE_REVISION`, applies the backend patch, builds LLVM/Clang,
+and installs selected components. `emulator-builder` builds the Rust emulator.
+The final `dev` stage contains the tools for developing Nosuz16 programs:
+
+| Command | Purpose |
+| --- | --- |
+| `nosuz16-cc INPUT.c OUTPUT.hex\|OUTPUT.bin` | Compile C and link the supplied runtime into an image |
+| `nosuz16-ir INPUT.ll OUTPUT.hex\|OUTPUT.bin` | Compile LLVM IR and link an image |
+| `nosuz16` | Run an image in the emulator |
+| `clang`, `llc`, `llvm-mc` | Compile C/IR and assemble native objects |
+| `opt` | Optimize LLVM IR |
+| `llvm-objdump`, `llvm-readobj` | Inspect/disassemble private transport objects |
+
+Clang's built-in headers, shared `libLLVM`, the Nosuz16 header, runtime
+sources, image builder, and examples are installed under `/opt/nosuz16`.
+`LLVM_BUILD_DIR` points to the installed toolchain and its binaries are on
+`PATH`. Bash, Python, and Make are available. The final image contains no
+LLVM checkout, backend patch, static LLVM archives, CMake/Ninja, Rust/Cargo,
+or LLVM backend development/test utilities. Existing Git/SSH, uv/Python, Node.js,
+Codex, Claude, Japanese locale, Tokyo timezone, and the `ubuntu` user are
+retained. Rebuild the VS Code development container to use these installed
+tools; the existing workspace mount and post-create setup continue to work.
+LLVM backend and emulator source development require their respective build
+stages or a separate environment with the corresponding build dependencies.
+
+From the repository root:
+
+```sh
+docker build -f .devcontainer/Dockerfile -t nosuz16-dev .
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspaces" nosuz16-dev \
+  nosuz16-cc llvm-nosuz16/examples/hello.c hello.bin
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspaces" nosuz16-dev \
+  nosuz16 --dump hello.bin
+docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/workspaces" nosuz16-dev
+```
+
+The mount supplies your program sources and receives generated images.
+The default working directory is `/workspaces`. The compiler remains freestanding;
+the SDK does not add a complete C library or system linker for Nosuz16.
+For manual disassembly, specify `llvm-objdump --triple=nosuz16 -d PROGRAM.o`.
+
+`.dockerignore` excludes the local LLVM checkout, Cargo build directories,
+and agent/Git data from the build context. LLVM compilation defaults to two
+jobs and one link job; `--build-arg LLVM_BUILD_JOBS=N` changes compilation
+parallelism. The `emulator-builder` stage uses Rust 1.85.1. Package installation occurs
+inside Docker stages; no host package installation is needed.
+
+The final stage runs [tests/sdk.py](tests/sdk.py) against the installed tools.
+It checks C/IR images, UART input/output, stack restoration, relocated Clang
+resource headers, packed memory, optimization, and object inspection. Run
+that check again with:
+
+```sh
+docker run --rm nosuz16-dev python3 /opt/nosuz16/llvm-nosuz16/tests/sdk.py
+```
+
 ## Clang C frontend
 
 The build includes `clang` with a Nosuz16 target. Compile freestanding C at

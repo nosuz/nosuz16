@@ -1,5 +1,69 @@
 # syntax=docker/dockerfile:1.4
-FROM ubuntu:latest
+
+# Stage 1: LLVM builder
+# Build the patched LLVM/Clang toolchain. No local LLVM checkout is needed.
+FROM ubuntu:latest AS builder
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG LLVM_BUILD_JOBS=2
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+    build-essential ca-certificates cmake git lld ninja-build \
+    python3 zlib1g-dev libzstd-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cache the pinned upstream checkout separately from backend changes.
+COPY llvm-nosuz16/LLVM_BASE_REVISION /src/llvm-nosuz16/LLVM_BASE_REVISION
+RUN git init -q /src/llvm-project \
+    && git -C /src/llvm-project remote add origin https://github.com/llvm/llvm-project.git \
+    && git -C /src/llvm-project fetch --depth 1 origin "$(cat /src/llvm-nosuz16/LLVM_BASE_REVISION)" \
+    && git -C /src/llvm-project checkout --detach FETCH_HEAD
+
+COPY llvm-nosuz16/patches/0001-nosuz16-backend.patch /src/llvm-nosuz16/patches/0001-nosuz16-backend.patch
+COPY llvm-nosuz16/scripts/apply.sh /src/llvm-nosuz16/scripts/apply.sh
+# This step takes over an hour.
+RUN /src/llvm-nosuz16/scripts/apply.sh \
+    && cmake -S /src/llvm-project/llvm -B /src/build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/out/toolchain \
+    -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_USE_LINKER=lld \
+    -DLLVM_PARALLEL_LINK_JOBS=1 \
+    -DLLVM_TARGETS_TO_BUILD= -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=Nosuz16 \
+    -DLLVM_ENABLE_PROJECTS=clang -DLLVM_INCLUDE_TESTS=OFF \
+    -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
+    -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_LINK_LLVM_DYLIB=ON \
+    -DCLANG_LINK_CLANG_DYLIB=OFF \
+    -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_LIBEDIT=OFF \
+    -DLLVM_ENABLE_CURL=OFF -DLLVM_ENABLE_HTTPLIB=OFF \
+    -DCLANG_ENABLE_STATIC_ANALYZER=OFF -DCLANG_ENABLE_ARCMT=OFF \
+    && cmake --build /src/build --parallel "${LLVM_BUILD_JOBS}" \
+    --target clang llc llvm-mc opt llvm-objdump llvm-readobj clang-resource-headers \
+    && for component in LLVM clang llc llvm-mc opt llvm-objdump llvm-readobj clang-resource-headers; do \
+    cmake --install /src/build --strip --component "${component}" || exit 1; \
+    done \
+    && rm -f /out/toolchain/bin/clang++ /out/toolchain/bin/clang-cl \
+    /out/toolchain/bin/clang-cpp /out/toolchain/bin/clang-dxc \
+    && cp /src/llvm-project/llvm/LICENSE.TXT /out/toolchain/LICENSE.TXT
+
+COPY llvm-nosuz16/ /src/llvm-nosuz16/
+
+# Stage 2: Emulator builder
+FROM rust:1.85.1 AS emulator-builder
+
+WORKDIR /src/emulator
+
+# Copy Cargo project
+COPY nosuz16/Cargo.toml nosuz16/Cargo.lock ./
+COPY nosuz16/src/ ./src/
+
+# Build emulator
+RUN cargo build --release
+
+# Stage 3: Development environment
+# Software development needs installed tools, headers, and runtime sources.
+# Shared libLLVM avoids duplicating LLVM in each command-line executable.
+FROM ubuntu:latest AS dev
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # suppress clear apt cache
 RUN rm /etc/apt/apt.conf.d/docker-clean
 
@@ -68,7 +132,6 @@ RUN mkdir -p $UV_CACHE_DIR
 # specify `__pycache__` directory
 ENV PYTHONPYCACHEPREFIX=/tmp/pycache
 
-COPY .devcontainer/pyproject.toml .devcontainer/uv.lock ./
 # set `--frozen` to `uv sync` on runtime
 RUN --mount=type=cache,target=$UV_CACHE_DIR,sharing=locked \
     uv venv /opt/venv \
@@ -101,24 +164,31 @@ ARG CLAUDE_BUST
 RUN echo "CLAUDE_BUST=$CLAUDE_BUST" \
     && curl -fsSL https://claude.ai/install.sh | bash
 
-# install Rust
-USER ubuntu
-
-ENV CARGO_HOME=/home/ubuntu/.cargo
-ENV RUSTUP_HOME=/home/ubuntu/.rustup
-ENV PATH="${CARGO_HOME}/bin:${PATH}"
-
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- \
-        -y \
-        --no-modify-path \
-        --profile minimal \
-        --default-toolchain 1.85.1
-
 USER root
 
-RUN --mount=type=cache,target=/var/cache/apt \
-    --mount=type=cache,sharing=locked,target=/var/lib/apt \
-    apt-get update \
-    && apt-get install --no-install-recommends -y \
-    cmake ninja-build lld zlib1g-dev libzstd-dev
+# install LLVM and Clang
+COPY --from=builder /out/toolchain/ /opt/nosuz16/toolchain/
+COPY --from=builder /src/llvm-nosuz16/include/ /opt/nosuz16/llvm-nosuz16/include/
+COPY --from=builder /src/llvm-nosuz16/runtime/ /opt/nosuz16/llvm-nosuz16/runtime/
+COPY --from=builder /src/llvm-nosuz16/examples/ /opt/nosuz16/llvm-nosuz16/examples/
+COPY --from=builder /src/llvm-nosuz16/scripts/compile.sh /src/llvm-nosuz16/scripts/compile-c.sh /src/llvm-nosuz16/scripts/image.py /opt/nosuz16/llvm-nosuz16/scripts/
+COPY --from=builder /src/llvm-nosuz16/tests/sdk.py /opt/nosuz16/llvm-nosuz16/tests/sdk.py
+COPY Nosuz16_CPU_Spec.md /opt/nosuz16/Nosuz16_CPU_Spec.md
+COPY llvm-nosuz16/README.md /opt/nosuz16/llvm-nosuz16/README.md
+COPY llvm-nosuz16/LLVM_BASE_REVISION /opt/nosuz16/llvm-nosuz16/LLVM_BASE_REVISION
+
+# install emulator
+COPY --from=emulator-builder \
+    /src/emulator/target/release/nosuz16 \
+    /opt/nosuz16/toolchain/bin/nosuz16
+RUN strip /opt/nosuz16/toolchain/bin/nosuz16
+ENV LLVM_BUILD_DIR=/opt/nosuz16/toolchain \
+    PATH="/opt/nosuz16/toolchain/bin:/home/ubuntu/.local/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1
+RUN printf '%s\n' '#!/bin/sh' 'exec /opt/nosuz16/llvm-nosuz16/scripts/compile-c.sh "$@"' > /usr/local/bin/nosuz16-cc \
+    && printf '%s\n' '#!/bin/sh' 'exec /opt/nosuz16/llvm-nosuz16/scripts/compile.sh "$@"' > /usr/local/bin/nosuz16-ir \
+    && chmod +x /usr/local/bin/nosuz16-cc /usr/local/bin/nosuz16-ir \
+    && python3 /opt/nosuz16/llvm-nosuz16/tests/sdk.py
+
+WORKDIR /workspaces
+# CMD ["/bin/bash"]

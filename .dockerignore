@@ -1,0 +1,7 @@
+.git
+.codex
+.claude
+llvm-project
+**/target
+**/__pycache__
+**/*.pyc
