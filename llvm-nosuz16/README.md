@@ -101,6 +101,44 @@ that check again with:
 docker run --rm nosuz16-dev python3 /opt/nosuz16/llvm-nosuz16/tests/sdk.py
 ```
 
+## Mandelbrot ASCII demo
+
+[examples/mandelbrot.c](examples/mandelbrot.c) renders the 79×25
+[ASCIIART benchmark](https://haserin09.la.coocan.jp/asciiart.html) through
+UART. It samples `x * 0.0458` for `x=-39..39` and `y * 0.08333` for
+`y=-12..12`, starts each orbit at its sample coordinate, and performs up to
+16 updates. Escaping points show the update index in hexadecimal (`0`–`F`);
+bounded points are spaces. See [sample output](examples/mandelbrot.txt).
+
+The calculation uses Q16 fixed point stored as two 16-bit fields. Carry,
+borrow, and partial-product helpers avoid unsupported C `long` and floating
+point arithmetic. Coordinates are rounded separately to avoid accumulated
+step error. For this grid, the emulator's entire output matches an independent
+double-precision implementation of the benchmark formula.
+
+Inside the development container, use the source in the mounted workspace
+so a demo added after the image was built is available immediately:
+
+```sh
+nosuz16-cc /workspaces/llvm-nosuz16/examples/mandelbrot.c /tmp/mandelbrot.bin
+nosuz16 --max-steps 500000000 /tmp/mandelbrot.bin
+```
+
+From a source checkout with the compiler built:
+
+```sh
+./llvm-nosuz16/scripts/compile-c.sh llvm-nosuz16/examples/mandelbrot.c /tmp/mandelbrot.bin
+cargo run --release --manifest-path nosuz16/Cargo.toml -- \
+  --max-steps 500000000 /tmp/mandelbrot.bin
+```
+
+The increased instruction limit allows for software multiplication. The demo
+returns zero and emits 25 rows of 79 ASCII characters, each with a newline.
+
+Run `python3 llvm-nosuz16/tests/mandelbrot.py` to compare every pixel and the
+saved sample with an independent floating-point reference. It uses the
+installed emulator, the local release build, or `NOSUZ16_EMULATOR` if set.
+
 ## Clang C frontend
 
 The build includes `clang` with a Nosuz16 target. Compile freestanding C at
