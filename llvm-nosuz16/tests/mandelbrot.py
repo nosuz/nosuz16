@@ -38,7 +38,9 @@ def main():
         subprocess.run([ROOT / 'llvm-nosuz16/scripts/compile-c.sh',
                         ROOT / 'llvm-nosuz16/examples/mandelbrot.c', image],
                        check=True, timeout=120)
-        result = subprocess.run([emulator, '--dump', '--max-steps', '500000000', image],
+        # The full-grid fixed-point demo takes about 133.9 million instructions.
+        # Allow compiler variation while catching a return to the old workload.
+        result = subprocess.run([emulator, '--dump', '--max-steps', '200000000', image],
                                 capture_output=True, text=True, check=True, timeout=120)
         expected = reference()
         assert result.stdout == expected, 'Demo differs from the floating-point reference'

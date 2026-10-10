@@ -68,6 +68,40 @@ __attribute__((noinline)) word fixed_multiply_high(word a, word b) {
   return p3 + (p1 >> 8) + (p2 >> 8) + (carry >> 8);
 }
 
+/* Squaring needs only three partial products: both cross terms are equal. */
+__attribute__((noinline)) word fixed_square_high(word a) {
+  word low = a & 255u;
+  word high = a >> 8;
+  volatile word p0 = low * low;
+  volatile word p1 = low * high;
+  volatile word p2 = high * high;
+  word carry = (p0 >> 8) + 2u * (p1 & 255u);
+  return p2 + 2u * (p1 >> 8) + (carry >> 8);
+}
+
+/* Square a component whose magnitude is at most two. Keep this shared:
+ * inlining every square makes the program much larger for little speedup. */
+__attribute__((noinline)) void fixed_square(const fixed *a, fixed *result) {
+  fixed magnitude;
+  magnitude.whole = a->whole;
+  magnitude.fraction = a->fraction;
+  if (magnitude.whole < 0) {
+    fixed_negate(&magnitude);
+  }
+  word high = (word)magnitude.whole;
+  word low = magnitude.fraction;
+  word fraction = fixed_square_high(low);
+  word whole = high == 2u ? 4u : high;
+  word i;
+  for (i = 0; i < 2u * high; ++i) {
+    word sum = (word)(fraction + low);
+    whole += sum < fraction;
+    fraction = sum;
+  }
+  result->whole = (short)whole;
+  result->fraction = fraction;
+}
+
 /* Multiply the small signed Q16 values used here; truncate toward zero. */
 void fixed_multiply(const fixed *a, const fixed *b, fixed *result) {
   fixed left, right;
@@ -88,14 +122,22 @@ void fixed_multiply(const fixed *a, const fixed *b, fixed *result) {
   word al = left.fraction;
   word bl = right.fraction;
   word fraction = fixed_multiply_high(al, bl);
-  word whole = ah * bh + fixed_multiply_high(ah, bl) + fixed_multiply_high(bh, al);
-  word sum = (word)(fraction + (word)(ah * bl));
-  whole += sum < fraction;
-  fraction = sum;
-  sum = (word)(fraction + (word)(bh * al));
-  whole += sum < fraction;
+  /* Orbit components are bounded by two before multiplication. Add the
+   * integer cross terms at most twice, rather than doing general products. */
+  word whole = 0;
+  word i;
+  for (i = 0; i < ah; ++i) {
+    word sum = (word)(fraction + bl);
+    whole += bh + (sum < fraction);
+    fraction = sum;
+  }
+  for (i = 0; i < bh; ++i) {
+    word sum = (word)(fraction + al);
+    whole += sum < fraction;
+    fraction = sum;
+  }
   result->whole = (short)whole;
-  result->fraction = sum;
+  result->fraction = fraction;
   if (negative) {
     fixed_negate(result);
   }
@@ -111,9 +153,10 @@ char mandelbrot_pixel(const fixed *cx, const fixed *cy) {
   fixed xx, yy, xy, radius;
   unsigned int iteration;
 
+  /* Reuse each escape check's squares in the next update. */
+  fixed_square(&x, &xx);
+  fixed_square(&y, &yy);
   for (iteration = 0; iteration < MAX_ITERATIONS; ++iteration) {
-    fixed_multiply(&x, &x, &xx);
-    fixed_multiply(&y, &y, &yy);
     fixed_multiply(&x, &y, &xy);
     fixed_subtract(&xx, &yy, &x);
     fixed_add(&x, cx, &x);
@@ -128,8 +171,8 @@ char mandelbrot_pixel(const fixed *cx, const fixed *cy) {
         (y.whole == 2 && y.fraction != 0)) {
       return digits[iteration];
     }
-    fixed_multiply(&x, &x, &xx);
-    fixed_multiply(&y, &y, &yy);
+    fixed_square(&x, &xx);
+    fixed_square(&y, &yy);
     fixed_add(&xx, &yy, &radius);
     if (radius.whole > 4 || (radius.whole == 4 && radius.fraction != 0)) {
       return digits[iteration];
@@ -141,7 +184,7 @@ char mandelbrot_pixel(const fixed *cx, const fixed *cy) {
 int main(void) {
   int row, column;
   fixed cx, cy;
-
+  /* Run the orbit calculation independently for every pixel. */
   for (row = -12; row <= 12; ++row) {
     cy.whole = 0;
     cy.fraction = y_fraction[row < 0 ? -row : row];

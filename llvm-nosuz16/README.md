@@ -116,6 +116,20 @@ point arithmetic. Coordinates are rounded separately to avoid accumulated
 step error. For this grid, the emulator's entire output matches an independent
 double-precision implementation of the benchmark formula.
 
+Every one of the 1,975 pixels runs its own orbit calculation. Pixel results
+are emitted immediately without caching, mirroring rows, or analytic
+interior shortcuts. Arithmetic improvements reuse squares between orbit
+updates, use three partial products for squaring, and replace small integer
+cross-products with additions. These changes preserve every output byte,
+including the hexadecimal escape counts.
+
+With the current SDK at `-O2`, execution drops from 405,148,656 to
+133,882,384 guest instructions (including HALT), about **3.0× faster** by
+instruction count. The binary grows from 20,936 to 23,988 bytes. These
+measurements cover the entire program, including UART output; emulator
+wall time depends on the host, and hardware timing depends on instruction
+costs.
+
 Inside the development container, use the source in the mounted workspace
 so a demo added after the image was built is available immediately:
 
@@ -139,6 +153,7 @@ characters, each with a newline.
 Run `python3 llvm-nosuz16/tests/mandelbrot.py` to compare every pixel and the
 saved sample with an independent floating-point reference. It uses the
 installed emulator, the local release build, or `NOSUZ16_EMULATOR` if set.
+The test also requires completion within 200 million guest instructions.
 
 ## Clang C frontend
 
