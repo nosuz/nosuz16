@@ -1,7 +1,7 @@
 #include "nosuz16.h"
 
 /* X moves first; the player chooses whether the human or CPU owns X.
- * The CPU searches a move and the opponent's reply.
+ * The CPU uses bounded iterative-deepening alpha-beta search.
  * A sentinel border makes all eight directions safe without row wrapping.
  * Helpers have external linkage to retain the supported C calling convention.
  * Shared helpers and disabled loop unrolling keep the image within 64 KiB. */
@@ -78,68 +78,195 @@ __attribute__((noinline)) int has_move(int player) {
   return 0;
 }
 
-/* Score from the CPU's perspective: corners are valuable, their adjacent
- * squares risky. Near the end, favor the final number of discs instead. */
+/* Bounded iterative deepening: retain the last fully searched result. */
+#define SEARCH_NODES 3000
+#define SEARCH_DEPTH 4
+#define WIN_SCORE 20000
+static unsigned int search_nodes;
+static int search_aborted;
+static const short corners[4] = {11, 18, 81, 88};
+static const short corner_steps[8] = {1, 10, -1, 10, 1, -10, -1, -10};
+
+__attribute__((noinline)) int empty_count(void) {
+  int row, column, count = 0;
+  #pragma clang loop unroll(disable)
+  for (row = 1; row <= 8; ++row) {
+    #pragma clang loop unroll(disable)
+    for (column = 1; column <= 8; ++column)
+      count += board[row * 10 + column] == EMPTY;
+  }
+  return count;
+}
+
+/* CPU perspective. Mobility and few frontier discs matter early; disc
+ * count matters late. Corner-adjacent penalties apply only to empty corners.
+ * Unbroken edge runs anchored at an owned corner are permanently stable. */
 __attribute__((noinline)) int evaluate_board(void) {
-  int row, column, score = 0, discs = 0, empty = 0;
-  #pragma clang loop unroll(disable)
-  for (row = 1; row <= 8; ++row) {
-    #pragma clang loop unroll(disable)
-    for (column = 1; column <= 8; ++column) {
-      int piece = board[row * 10 + column];
-      int weight = 2;
-      if (!piece) { ++empty; continue; }
-      if (row == 1 || row == 8) {
-        weight = 10;
-        if (column == 1 || column == 8) weight = 100;
-        else if (column == 2 || column == 7) weight = -25;
-      } else if (column == 1 || column == 8) {
-        weight = (row == 2 || row == 7) ? -25 : 10;
-      } else if ((row == 2 || row == 7) &&
-                 (column == 2 || column == 7)) weight = -40;
-      if (piece == COMPUTER) { score += weight; ++discs; }
-      else { score -= weight; --discs; }
-    }
-  }
-  return empty <= 8 ? discs * 100 + score : score;
-}
-
-__attribute__((noinline)) int opponent_reply_score(void) {
-  char saved[100];
-  int row, column, worst = 30000, found = 0;
-  copy_board(saved, board);
-  #pragma clang loop unroll(disable)
-  for (row = 1; row <= 8; ++row) {
-    #pragma clang loop unroll(disable)
-    for (column = 1; column <= 8; ++column) {
-      if (play_move(row * 10 + column, HUMAN, 1)) {
-        int score = evaluate_board();
-        if (score < worst) worst = score;
-        found = 1;
-        copy_board(board, saved);
-      }
-    }
-  }
-  return found ? worst : evaluate_board();
-}
-
-__attribute__((noinline)) int choose_cpu_move(void) {
-  char saved[100];
-  int row, column, best = -30000, move = 0;
-  copy_board(saved, board);
+  int row, column, direction, score = 0, discs = 0, empty = 0;
+  int mobility = 0, frontier = 0;
   #pragma clang loop unroll(disable)
   for (row = 1; row <= 8; ++row) {
     #pragma clang loop unroll(disable)
     for (column = 1; column <= 8; ++column) {
       int square = row * 10 + column;
-      if (play_move(square, COMPUTER, 1)) {
-        int score = opponent_reply_score();
-        if (score > best) { best = score; move = square; }
-        copy_board(board, saved);
+      int piece = board[square];
+      if (!piece) {
+        ++empty;
+        mobility += (play_move(square, COMPUTER, 0) != 0) -
+                    (play_move(square, HUMAN, 0) != 0);
+      } else {
+        int sign = piece == COMPUTER ? 1 : -1;
+        discs += sign;
+        #pragma clang loop unroll(disable)
+        for (direction = 0; direction < 8; ++direction) {
+          if (board[square + directions[direction]] == EMPTY) {
+            frontier += sign;
+            break;
+          }
+        }
       }
     }
   }
+  #pragma clang loop unroll(disable)
+  for (direction = 0; direction < 4; ++direction) {
+    int corner = corners[direction];
+    int horizontal = corner_steps[2 * direction];
+    int vertical = corner_steps[2 * direction + 1];
+    int owner = board[corner];
+    if (!owner) {
+      int piece = board[corner + horizontal + vertical];
+      if (piece) score += piece == COMPUTER ? -120 : 120;
+      piece = board[corner + horizontal];
+      if (piece) score += piece == COMPUTER ? -40 : 40;
+      piece = board[corner + vertical];
+      if (piece) score += piece == COMPUTER ? -40 : 40;
+    } else {
+      int sign = owner == COMPUTER ? 1 : -1;
+      int next;
+      score += sign * 400;
+      next = corner + horizontal;
+      while (board[next] == owner) { score += sign * 30; next += horizontal; }
+      next = corner + vertical;
+      while (board[next] == owner) { score += sign * 30; next += vertical; }
+    }
+  }
+  return score + mobility * 25 - frontier * 8 + discs * (empty <= 12 ? 12 : 1);
+}
+
+__attribute__((noinline)) int terminal_score(void) {
+  int row, column, discs = 0;
+  #pragma clang loop unroll(disable)
+  for (row = 1; row <= 8; ++row) {
+    #pragma clang loop unroll(disable)
+    for (column = 1; column <= 8; ++column) {
+      int piece = board[row * 10 + column];
+      discs += (piece == COMPUTER) - (piece == HUMAN);
+    }
+  }
+  return discs > 0 ? WIN_SCORE + discs : discs < 0 ? -WIN_SCORE + discs : 0;
+}
+
+/* Sort legal moves: corners, ordinary squares, then dangerous neighbors.
+ * Stable insertion ordering gives deterministic ties in row order. */
+__attribute__((noinline)) int ordered_moves(char *moves, int player) {
+  char ranks[64];
+  int row, column, count = 0;
+  #pragma clang loop unroll(disable)
+  for (row = 1; row <= 8; ++row) {
+    #pragma clang loop unroll(disable)
+    for (column = 1; column <= 8; ++column) {
+      int square = row * 10 + column;
+      if (play_move(square, player, 0)) {
+        int rank = 2, index = count, corner;
+        #pragma clang loop unroll(disable)
+        for (corner = 0; corner < 4; ++corner) {
+          int c = corners[corner];
+          int h = corner_steps[2 * corner], v = corner_steps[2 * corner + 1];
+          if (square == c) rank = 3;
+          else if (!board[c] && (square == c + h || square == c + v || square == c + h + v))
+            rank = 1;
+        }
+        while (index > 0 && ranks[index - 1] < rank) {
+          ranks[index] = ranks[index - 1];
+          moves[index] = moves[index - 1];
+          --index;
+        }
+        ranks[index] = (char)rank;
+        moves[index] = (char)square;
+        ++count;
+      }
+    }
+  }
+  return count;
+}
+
+/* Negamax alpha-beta. A forced pass consumes no move depth; two consecutive
+ * passes are terminal even with empty squares remaining. Every applied move
+ * is restored, including when the node budget interrupts a search. */
+__attribute__((noinline)) int search(int player, int depth, int alpha, int beta, int passed) {
+  char moves[64], saved[100];
+  int count, index, best = -30000, sign = player == COMPUTER ? 1 : -1;
+  if (++search_nodes > SEARCH_NODES) { search_aborted = 1; return 0; }
+  count = ordered_moves(moves, player);
+  if (!count) {
+    if (passed) return sign * terminal_score();
+    return -search(3 - player, depth, -beta, -alpha, 1);
+  }
+  if (!depth) return sign * evaluate_board();
+  copy_board(saved, board);
+  #pragma clang loop unroll(disable)
+  for (index = 0; index < count; ++index) {
+    int score;
+    play_move(moves[index], player, 1);
+    score = -search(3 - player, depth - 1, -beta, -alpha, 0);
+    copy_board(board, saved);
+    if (search_aborted) return 0;
+    if (score > best) best = score;
+    if (score > alpha) alpha = score;
+    if (alpha >= beta) break;
+  }
+  return best;
+}
+
+__attribute__((noinline)) int choose_cpu_move(void) {
+  char moves[64], saved[100];
+  int count = ordered_moves(moves, COMPUTER);
+  int move, depth, maximum = SEARCH_DEPTH, empty = empty_count();
+  if (!count) return 0;
+  move = moves[0];
+  /* Attempt an exact finish in small endgames, within the same node budget. */
+  if (empty <= 8) maximum = empty;
+  search_nodes = 0;
+  search_aborted = 0;
+  copy_board(saved, board);
+  #pragma clang loop unroll(disable)
+  for (depth = 1; depth <= maximum; ++depth) {
+    int index, best = -30000, candidate = move;
+    #pragma clang loop unroll(disable)
+    for (index = 0; index < count; ++index) {
+      int score;
+      play_move(moves[index], COMPUTER, 1);
+      score = -search(HUMAN, depth - 1, -30000, -best, 0);
+      copy_board(board, saved);
+      if (search_aborted) break;
+      if (score > best) { best = score; candidate = moves[index]; }
+    }
+    if (search_aborted) break;
+    move = candidate;
+    /* Search the previous best move first in the next iteration. */
+    for (index = 0; moves[index] != move; ++index) {}
+    while (index > 0) { moves[index] = moves[index - 1]; --index; }
+    moves[0] = (char)move;
+  }
   return move;
+}
+
+__attribute__((noinline)) void print_score(int human, int cpu) {
+  printf("X (%s): %d  O (%s): %d\n",
+         human_symbol == 'X' ? "You" : "CPU",
+         human_symbol == 'X' ? human : cpu,
+         human_symbol == 'O' ? "You" : "CPU",
+         human_symbol == 'X' ? cpu : human);
 }
 
 __attribute__((noinline)) void print_board(void) {
@@ -158,11 +285,7 @@ __attribute__((noinline)) void print_board(void) {
     }
     putc('\n');
   }
-  printf("X (%s): %d  O (%s): %d\n",
-         human_symbol == 'X' ? "You" : "CPU",
-         human_symbol == 'X' ? human : cpu,
-         human_symbol == 'O' ? "You" : "CPU",
-         human_symbol == 'X' ? cpu : human);
+  print_score(human, cpu);
 }
 
 /* Consume a whole line, including overlong input. UART/terminal echo is
@@ -262,11 +385,8 @@ int main(void) {
     human += board[i] == HUMAN;
     cpu += board[i] == COMPUTER;
   }
-  printf("Game over. X (%s): %d  O (%s): %d. %s\n",
-         human_symbol == 'X' ? "You" : "CPU",
-         human_symbol == 'X' ? human : cpu,
-         human_symbol == 'O' ? "You" : "CPU",
-         human_symbol == 'X' ? cpu : human,
-         human > cpu ? "You win!" : human < cpu ? "CPU wins." : "Draw.");
+  text("Game over. ");
+  print_score(human, cpu);
+  text(human > cpu ? "You win!\n" : human < cpu ? "CPU wins.\n" : "Draw.\n");
   return 0;
 }

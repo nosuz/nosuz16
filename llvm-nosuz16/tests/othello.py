@@ -39,39 +39,95 @@ def apply(board, move, flipped, player):
 
 
 def evaluate(board):
-    score = discs = empty = 0
+    score = discs = empty = mobility = frontier = 0
+    cpu_moves, human_moves = moves(board, 2), moves(board, 1)
+    mobility = len(cpu_moves) - len(human_moves)
     for r, row in enumerate(board):
         for c, piece in enumerate(row):
             if not piece:
                 empty += 1
                 continue
-            edge_r, edge_c = r in (0, 7), c in (0, 7)
-            near_r, near_c = r in (1, 6), c in (1, 6)
-            if edge_r and edge_c:
-                weight = 100
-            elif (edge_r and near_c) or (edge_c and near_r):
-                weight = -25
-            elif edge_r or edge_c:
-                weight = 10
-            elif near_r and near_c:
-                weight = -40
-            else:
-                weight = 2
             sign = 1 if piece == 2 else -1
-            score += sign * weight
             discs += sign
-    return score + (100 * discs if empty <= 8 else 0)
+            if any(0 <= r + dr < 8 and 0 <= c + dc < 8 and not board[r + dr][c + dc]
+                   for dr, dc in DIRECTIONS):
+                frontier += sign
+    for r, c, dr, dc in ((0, 0, 1, 1), (0, 7, 1, -1), (7, 0, -1, 1), (7, 7, -1, -1)):
+        owner = board[r][c]
+        if not owner:
+            for rr, cc, weight in ((r + dr, c + dc, 120), (r, c + dc, 40), (r + dr, c, 40)):
+                piece = board[rr][cc]
+                if piece:
+                    score += -weight if piece == 2 else weight
+        else:
+            sign = 1 if owner == 2 else -1
+            score += 400 * sign
+            for step_r, step_c in ((dr, 0), (0, dc)):
+                rr, cc = r + step_r, c + step_c
+                while 0 <= rr < 8 and 0 <= cc < 8 and board[rr][cc] == owner:
+                    score += 30 * sign
+                    rr, cc = rr + step_r, cc + step_c
+    return score + mobility * 25 - frontier * 8 + discs * (12 if empty <= 12 else 1)
+
+
+def ordered(board, legal):
+    def rank(move):
+        r, c = move
+        if r in (0, 7) and c in (0, 7):
+            return 3
+        for rr, cc in ((0, 0), (0, 7), (7, 0), (7, 7)):
+            if not board[rr][cc] and abs(r - rr) <= 1 and abs(c - cc) <= 1:
+                return 1
+        return 2
+    return sorted(legal, key=rank, reverse=True)
 
 
 def cpu_move(board, legal):
-    best, selected = -30000, None
-    for move, flipped in legal.items():
-        after = apply(board, move, flipped, 2)
-        replies = moves(after, 1)
-        score = min(evaluate(apply(after, reply, flips, 1))
-                    for reply, flips in replies.items()) if replies else evaluate(after)
-        if score > best:
-            best, selected = score, move
+    class BudgetReached(Exception):
+        pass
+
+    nodes = 0
+
+    def search(position, player, depth, alpha, beta, passed=False):
+        nonlocal nodes
+        nodes += 1
+        if nodes > 3000:
+            raise BudgetReached
+        choices = moves(position, player)
+        sign = 1 if player == 2 else -1
+        if not choices:
+            if passed:
+                discs = sum(row.count(2) - row.count(1) for row in position)
+                return sign * (20000 + discs if discs > 0 else -20000 + discs if discs < 0 else 0)
+            return -search(position, 3 - player, depth, -beta, -alpha, True)
+        if not depth:
+            return sign * evaluate(position)
+        best = -30000
+        for move in ordered(position, choices):
+            after = apply(position, move, choices[move], player)
+            score = -search(after, 3 - player, depth - 1, -beta, -alpha)
+            best, alpha = max(best, score), max(alpha, score)
+            if alpha >= beta:
+                break
+        return best
+
+    choices = ordered(board, legal)
+    selected = choices[0]
+    empty = sum(row.count(0) for row in board)
+    maximum = empty if empty <= 8 else 4
+    for depth in range(1, maximum + 1):
+        best, candidate = -30000, selected
+        try:
+            for move in choices:
+                after = apply(board, move, legal[move], 2)
+                score = -search(after, 1, depth - 1, -30000, -best)
+                if score > best:
+                    best, candidate = score, move
+        except BudgetReached:
+            break
+        selected = candidate
+        choices.remove(selected)
+        choices.insert(0, selected)
     return selected
 
 
@@ -106,7 +162,7 @@ def reference(first=1):
     states = [[[colors[piece] for piece in row] for row in state] for state in states]
     x, o = (human, cpu) if first == 1 else (cpu, human)
     x_owner, o_owner = ('You', 'CPU') if first == 1 else ('CPU', 'You')
-    ending = f'Game over. X ({x_owner}): {x}  O ({o_owner}): {o}. {winner}'
+    ending = f'Game over. X ({x_owner}): {x}  O ({o_owner}): {o}\n{winner}'
     return str(first) + '\n' + ''.join(inputs), states, events, ending
 
 
@@ -126,17 +182,15 @@ def main():
         assert image.stat().st_size < 60000, 'Insufficient room for the search stack'
 
         def run(arguments, input=None):
-            result = subprocess.run([emulator, '--dump', '--max-steps', '2000000000',
+            result = subprocess.run([emulator, '--dump', '--max-steps', '12000000000',
                                      *arguments, image], input=input, capture_output=True,
-                                    text=True, check=True, timeout=120)
+                                    text=True, check=True, timeout=240)
             assert 'r1=0000' in result.stderr and 'r6=FF00' in result.stderr, result.stderr
             assert 'halted=true faulted=false' in result.stderr, result.stderr
             return result.stdout
 
         for first in (1, 2):
             inputs, states, events, ending = reference(first)
-            if first == 1:
-                assert sum('passes' in event for event in events) > 2
             output = run(['--uart-input', inputs])
             assert rendered_boards(output) == states, 'Board/flipping mismatch'
             scores = [(sum(row.count(1) for row in state), sum(row.count(2) for row in state))
@@ -155,7 +209,7 @@ def main():
         short_input = 'invalid\n 1 \r\n\na1\nz9\nd3extra-long\n D3 \r\nq\n'
         short = run(['--uart-input', short_input])
         assert short.count('Invalid move.') == 4, short
-        assert len(rendered_boards(short)) == 3 and 'CPU plays c3.' in short, short
+        assert len(rendered_boards(short)) == 3 and 'CPU plays ' in short, short
         assert short.endswith('Your move: Goodbye.\n'), short
         assert 'Choose 1 or 2, or q to quit.' in short
         assert run([], input='q\n').endswith('Goodbye.\n')

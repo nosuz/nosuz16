@@ -159,10 +159,20 @@ The test also requires completion within 200 million guest instructions.
 
 [examples/othello.c](examples/othello.c) implements an 8×8 human-versus-CPU
 game over UART. X always moves first; whoever is selected to start controls
-X, and the other player controls O. The CPU uses a two-ply search and a positional evaluation that favors corners and penalizes nearby
-squares. In the last eight empty squares, disc counts also influence its
-evaluation. Ties are broken in row order. It is a small opponent rather
-than a tournament-strength engine.
+X, and the other player controls O. The CPU uses iterative-deepening
+alpha-beta search up to four plies, with a shared budget of 3,000 search
+nodes per move. Move ordering searches corners first and risky neighbors
+last. If the budget interrupts a deeper search, it retains the move from
+the last completed depth. The CPU takes longer to move than the original
+two-ply opponent.
+
+Evaluation combines legal-move mobility, frontier discs, corner ownership,
+and stable edge runs anchored at corners. Corner-neighbor penalties apply
+while the corner is empty; disc counts gain weight in the last 12 empty
+squares. With eight or fewer empty squares, the engine attempts a search
+to the end within the same budget. Completed terminal searches prioritize
+winning and then disc margin. Passes consume no move depth, and two
+consecutive passes end the game, including on a partly empty board.
 
 ```sh
 nosuz16-cc /workspaces/llvm-nosuz16/examples/othello.c /tmp/othello.bin
@@ -175,15 +185,23 @@ Choose `1` to play first as X or `2` for CPU first as X (you play O), then Enter
 Enter moves like `d3` followed by Enter, or `q` to quit. Uppercase columns
 and CRLF input are accepted. The game validates captures in all eight
 directions, handles forced passes, and reports the final score and winner.
-The image is about 39 KiB; shared helpers and disabled loop unrolling leave
+The image is about 56 KiB; shared helpers and disabled loop unrolling leave
 room for the board and search stack in the 64 KiB address space.
 
 Run `python3 llvm-nosuz16/tests/othello.py` to check complete games with
 each starting player against independent Python board rules and search,
-including every displayed
-board, forced passes, and the final score. It also checks malformed moves,
+including every displayed board, forced passes, and the final score.
+It also checks malformed moves,
 CRLF, quitting, and live stdin. Set `NOSUZ16_EMULATOR` to the updated local
 emulator if the installed version predates default stdin UART input.
+
+Run `python3 llvm-nosuz16/tests/othello-strength.py` for paired native matches
+against the original opponent from commit `313ebbb` (requires `cc` and that
+Git history). Four seeded, four-ply random openings are played with colors
+swapped. The stronger engine won all eight games in this suite. This measures
+improvement over the original code; it does not establish an Elo or kyu/dan
+rating. Native matches check playing choices and board restoration; the
+separate emulator test verifies the actual Nosuz16 image.
 
 ## Clang C frontend
 

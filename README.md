@@ -106,8 +106,9 @@ while you play `O`, then Enter.
 Enter a column and row such as `d3`, then press Enter. Enter `q` to quit.
 Invalid moves are rejected, and a player with no legal move passes
 automatically. The game ends when neither player can move and reports the
-disc counts and winner. The CPU searches its move and your possible reply,
-using corner and edge weights to choose a move.
+disc counts and winner. The CPU searches up to four moves ahead with a
+bounded alpha-beta search, evaluates mobility and corner control, and
+attempts deeper searches in small endgames.
 
 ```bash
 nosuz16-cc llvm-nosuz16/examples/othello.c /tmp/othello.bin
